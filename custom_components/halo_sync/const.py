@@ -100,18 +100,18 @@ TV_GIVEUP_S = 15
 
 # The single TV reader (tv_reader.py). JointSpace hangs on new TLS handshakes at a high rate and the
 # TV updates its Ambilight values only about every 100 ms, so one keep-alive session at 10 Hz.
-TV_POLL_HZ = 10
+TV_POLL_HZ = 10  # while a stream runs (TvReader.fast)
+TV_IDLE_POLL_HZ = 1  # otherwise (color sensor, TV style)
 CONF_TV_ENDPOINT = "tv_endpoint"  # entry option, falls back to TV_ENDPOINT
 TV_ENDPOINTS = ("measured", "processed")
 # "measured" answered in up to 1.1 s on a 2018 55PUS7373, "processed" in up to 0.2 s; "processed" is
-# all zeros on some newer firmware (see TV_MENU_STYLE above), which would read as standby.
+# all zeros on some newer firmware (see TV_MENU_STYLE above).
 TV_ENDPOINT = "measured"
 TV_REQUEST_TIMEOUT_S = 3
 TV_BACKOFF_MIN_S = 0.5  # pause after a failed request, doubled per failure up to TV_BACKOFF_MAX_S
 TV_BACKOFF_MAX_S = 30
 TV_POWER_POLL_S = 5  # how often /powerstate is checked while the TV is on
-TV_BLACK_STANDBY_S = 5  # a completely black edge for this long counts as standby
-TV_STANDBY_POLL_S = 5  # poll interval while in standby
+TV_STANDBY_POLL_S = 5  # poll interval while /powerstate reports something other than On
 # The tv_color sensor: at most one state change per interval, and only for a visible change.
 TV_COLOR_MIN_INTERVAL_S = 10
 TV_COLOR_MIN_DELTA = 10  # per channel, 0..255

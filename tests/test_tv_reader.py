@@ -13,7 +13,6 @@ from helpers import uniform_layer
 from halo_sync import tv_reader as tv_reader_mod
 from halo_sync.const import (
     TV_BACKOFF_MAX_S,
-    TV_BLACK_STANDBY_S,
     TV_MENU_STYLE,
     TV_POWER_POLL_S,
     TV_STANDBY_POLL_S,
@@ -52,6 +51,7 @@ class _FakeSession:
         self.power = "On"
         self.layer = COLOR
         self.fail = False
+        self.style_fail = False
         self.cost = 0.0
         self.closed = False
 
@@ -62,9 +62,9 @@ class _FakeSession:
             raise requests.ConnectionError("TV is off")
         if url.endswith("/powerstate"):
             return _Resp({"powerstate": self.power})
-        if url.endswith("/ambilight/currentconfiguration"):
-            return _Resp({"styleName": "FOLLOW_VIDEO", "isExpert": False, "menuSetting": "STANDARD"})
         if url.endswith("/menuitems/settings/current"):
+            if self.style_fail:
+                raise requests.ReadTimeout("menu timed out")
             return _Resp({"values": [{"value": {"Nodeid": TV_MENU_STYLE, "data": {"activenode_id": 1}}}]})
         if re.search(r"/ambilight/(measured|processed)$", url):
             return _Resp({"layer1": self.layer})
@@ -102,6 +102,7 @@ def changes() -> list[str]:
 def reader(clock, session, changes) -> TvReader:
     r = TvReader("tv.invalid", "user", "pass", session_factory=lambda: session, clock=clock)
     r._on_change = lambda: changes.append(r.state)
+    r.fast = True  # most tests look at the stream rate
     return r
 
 
@@ -127,6 +128,7 @@ def test_exactly_one_session_for_the_whole_run():
         return s
 
     r = TvReader("tv.invalid", "u", "p", hz=200, session_factory=factory)
+    r.fast = True
     orig = created[0]._answer
 
     def answer(url):
@@ -146,6 +148,38 @@ def test_exactly_one_session_for_the_whole_run():
     assert r._thread is not None and not r._thread.is_alive()
 
 
+def test_stop_between_requests_and_close_after_the_thread():
+    """stop() during a request: no further request of that cycle, session closed only afterwards."""
+    clock = _Clock()
+    session = _FakeSession(clock)
+    in_request, release = threading.Event(), threading.Event()
+    orig = session._answer
+    closed_while_running: list[bool] = []
+
+    def answer(url):
+        if url.endswith("/powerstate"):
+            in_request.set()
+            release.wait(5)
+        return orig(url)
+
+    def close():
+        closed_while_running.append(r._thread.is_alive() and r._thread is not threading.current_thread())
+        session.closed = True
+
+    session._answer = answer
+    session.close = close
+    r = TvReader("tv.invalid", "u", "p", session_factory=lambda: session)
+    r.start()
+    assert in_request.wait(5)
+    stopper = threading.Thread(target=r.stop)
+    stopper.start()
+    release.set()
+    stopper.join(5)
+    assert not r._thread.is_alive()
+    assert session.calls == ["https://tv.invalid:1926/6/powerstate"]  # the color read was skipped
+    assert session.closed and closed_while_running == [False]
+
+
 def test_polls_the_configured_endpoint(clock, session):
     r = TvReader("tv.invalid", "u", "p", endpoint="processed", session_factory=lambda: session, clock=clock)
     r._step()
@@ -160,6 +194,49 @@ def test_unknown_endpoint_falls_back_to_measured(clock, session):
 
 
 # ---- rate ----------------------------------------------------------------
+def test_idle_rate_is_one_hertz_and_fast_is_ten(clock, session):
+    r = TvReader("tv.invalid", "u", "p", session_factory=lambda: session, clock=clock)
+    session.cost = 0.02
+    r._step()
+    assert r._step() == pytest.approx(1.0 - 0.02)
+    r.fast = True
+    assert r._step() == pytest.approx(0.1 - 0.02)
+    r.fast = False
+    assert r._step() == pytest.approx(1.0 - 0.02)
+
+
+def test_wake_resets_backoff(clock, session):
+    session.fail = True
+    r = TvReader("tv.invalid", "u", "p", session_factory=lambda: session, clock=clock)
+    for _ in range(6):
+        r._step()
+    assert r._backoff == TV_BACKOFF_MAX_S
+    r.wake()
+    assert r._backoff == 0.5
+
+
+def test_wake_ends_the_wait():
+    session = _FakeSession(_Clock())
+    session.power = "Standby"  # the thread then waits TV_STANDBY_POLL_S between polls
+    r = TvReader("tv.invalid", "u", "p", session_factory=lambda: session)
+    r.start()
+    try:
+        deadline = threading.Event()
+        for _ in range(100):
+            if r.state == "standby":
+                break
+            deadline.wait(0.02)
+        assert r.state == "standby"
+        before = session.count("/powerstate")
+        r.wake()
+        for _ in range(100):
+            if session.count("/powerstate") > before:
+                break
+            deadline.wait(0.02)
+        assert session.count("/powerstate") > before, "wake() did not end the standby wait"
+    finally:
+        r.stop()
+
 def test_waits_the_rest_of_the_period(reader, session):
     session.cost = 0.03
     reader._step()  # first cycle also checks /powerstate
@@ -249,42 +326,28 @@ def test_powerstate_is_checked_only_every_few_seconds(reader, session, clock):
     assert session.count("/powerstate") == 2
 
 
-def test_black_edge_for_five_seconds_is_standby(reader, session, clock, changes):
+def test_black_frames_are_not_standby(reader, session, clock, changes):
     session.layer = BLACK
     delay, start = 0.0, clock.t
-    while reader.state != "standby" and clock.t < start + 10:
+    while clock.t < start + 20:
         delay = _wait_and_step(reader, clock, delay)
-    assert reader.state == "standby"
-    assert clock.t - start == pytest.approx(TV_BLACK_STANDBY_S, abs=0.11)
-    assert delay == TV_STANDBY_POLL_S
-    # Picture comes back: leaves standby on the next slow poll.
+    assert reader.state == "ok"
+    assert reader.black
+    assert delay == pytest.approx(0.1)  # still the full rate
+    assert reader.read_count >= 190
     session.layer = COLOR
+    reader._step()
+    assert not reader.black
+    assert changes == ["ok"]
+
+
+def test_leaving_standby_with_a_black_picture(reader, session, clock):
+    session.power = "Standby"
+    reader._step()
+    assert reader.state == "standby"
+    session.power, session.layer = "On", BLACK
     assert _wait_and_step(reader, clock, TV_STANDBY_POLL_S) == 0.0
-    assert reader.state == "ok"
-    assert changes == ["ok", "standby", "ok"]
-
-
-def test_black_stays_standby_while_power_is_on(reader, session, clock):
-    session.layer = BLACK
-    reader._step()
-    clock.t += TV_BLACK_STANDBY_S
-    reader._step()
-    assert reader.state == "standby"
-    assert _wait_and_step(reader, clock, TV_STANDBY_POLL_S) == TV_STANDBY_POLL_S
-    assert reader.state == "standby"
-
-
-def test_short_black_scene_is_not_standby(reader, session, clock):
-    session.layer = BLACK
-    reader._step()
-    clock.t += TV_BLACK_STANDBY_S - 1
-    reader._step()
-    session.layer = COLOR
-    reader._step()  # resets the black timer
-    session.layer = BLACK
-    clock.t += 2
-    reader._step()
-    assert reader.state == "ok"
+    assert reader.state == "ok" and reader.black
 
 
 def test_unreachable_while_in_standby(reader, session, clock):
@@ -324,18 +387,38 @@ def test_style_is_polled_only_when_wanted_and_rate_limited(reader, session, cloc
     delay = 0.0
     for _ in range(10):
         delay = _wait_and_step(reader, clock, delay)
-    assert session.count("/currentconfiguration") == 0
-    assert reader.style is None and reader.menu_settings is None
+    assert session.count("/menuitems/settings/current") == 0
+    assert reader.menu_settings is None
     reader.style_wanted = True
     for _ in range(int(TV_STYLE_POLL_S * 10)):  # TV_STYLE_POLL_S at 10 Hz
         delay = _wait_and_step(reader, clock, delay)
-    assert session.count("/currentconfiguration") == 1
     assert session.count("/menuitems/settings/current") == 1
-    assert reader.style["styleName"] == "FOLLOW_VIDEO"
     assert reader.menu_settings == {TV_MENU_STYLE: {"activenode_id": 1}}
     clock.t += TV_STYLE_POLL_S
     reader._step()
-    assert session.count("/currentconfiguration") == 2
+    assert session.count("/menuitems/settings/current") == 2
+    assert session.count("/currentconfiguration") == 0  # nobody reads it, so it is not polled
+
+
+def test_switching_style_off_forgets_the_menu(reader):
+    reader.style_wanted = True
+    reader._step()
+    assert reader.menu_settings is not None
+    reader.style_wanted = False
+    assert reader.menu_settings is None
+
+
+def test_style_error_keeps_state_and_old_value(reader, session, clock, changes):
+    reader.style_wanted = True
+    reader._step()
+    old = reader.menu_settings
+    session.style_fail = True
+    clock.t += TV_STYLE_POLL_S
+    delay = reader._step()
+    assert reader.state == "ok"
+    assert reader.menu_settings == old
+    assert delay < 0.5  # no backoff
+    assert changes == ["ok"]
 
 
 # ---- helpers and boundaries ------------------------------------------------

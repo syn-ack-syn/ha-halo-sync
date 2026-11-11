@@ -314,6 +314,9 @@ class Streamer:
                 _LOGGER.warning("Could not restore Hue light %s: %s", rid, exc)
 
     def _run(self) -> None:
+        # The reader polls at full rate only while a stream needs it; wake it from a slow wait or backoff.
+        self.reader.fast = True
+        self.reader.wake()
         with _RESTORE_LOCK:
             snap = self._snapshot_lights()
         try:
@@ -322,6 +325,7 @@ class Streamer:
             _LOGGER.warning("Halo Sync stopped: %s", exc)
             self.error = str(exc)
         finally:
+            self.reader.fast = False
             self._stop.set()
             try:
                 requests.put(self._cfg_url, json={"action": "stop"}, headers=self._hue_headers, verify=False, timeout=5)
@@ -386,11 +390,13 @@ class Streamer:
                     standby_since = mono if standby_since is None else standby_since
                     if mono - standby_since > TV_GIVEUP_S:
                         _LOGGER.info("Halo Sync stopped: the TV is in standby")
+                        self.error = "TV in standby"
                         return  # _run stops the entertainment area and restores the lights
                 else:
                     standby_since = None
-                    # In standby the reader polls slowly (or not at all while the TV is off), so
-                    # stale frames only count as a failure while the TV is not known to sleep.
+                    # In standby (/powerstate is not On) the reader reads no colors, so stale frames
+                    # are only checked outside it. A TV that is switched off completely does not
+                    # answer at all: the reader is unreachable and this ends the stream with an error.
                     if mono - max(tv.latest_at or 0.0, mono_start) > TV_GIVEUP_S:
                         raise RuntimeError("TV stopped answering")
                 sample_new_frame(mono)
