@@ -35,6 +35,7 @@ def _reply(hass, connection, msg, mgr):
 
 
 @websocket_api.websocket_command({vol.Required("type"): f"{DOMAIN}/get", vol.Optional("entry_id"): str})
+@websocket_api.require_admin
 @websocket_api.async_response
 async def ws_get(hass, connection, msg):
     mgr = _manager(hass, msg.get("entry_id"))
@@ -48,6 +49,7 @@ async def ws_get(hass, connection, msg):
 @websocket_api.websocket_command(
     {vol.Required("type"): f"{DOMAIN}/subscribe", vol.Optional("entry_id"): str}
 )
+@websocket_api.require_admin
 @callback
 def ws_subscribe(hass, connection, msg):
     from homeassistant.helpers.dispatcher import async_dispatcher_connect
@@ -67,6 +69,7 @@ def ws_subscribe(hass, connection, msg):
 @websocket_api.websocket_command(
     {vol.Required("type"): f"{DOMAIN}/activate", vol.Optional("entry_id"): str, vol.Required("preset"): str}
 )
+@websocket_api.require_admin
 @callback
 def ws_activate(hass, connection, msg):
     mgr = _manager(hass, msg.get("entry_id"))
@@ -85,6 +88,7 @@ def ws_activate(hass, connection, msg):
         vol.Required("preset"): dict,
     }
 )
+@websocket_api.require_admin
 @callback
 def ws_save(hass, connection, msg):
     mgr = _manager(hass, msg.get("entry_id"))
@@ -95,6 +99,7 @@ def ws_save(hass, connection, msg):
 @websocket_api.websocket_command(
     {vol.Required("type"): f"{DOMAIN}/delete", vol.Optional("entry_id"): str, vol.Required("preset_id"): str}
 )
+@websocket_api.require_admin
 @callback
 def ws_delete(hass, connection, msg):
     mgr = _manager(hass, msg.get("entry_id"))
@@ -106,6 +111,7 @@ def ws_delete(hass, connection, msg):
 
 
 @websocket_api.websocket_command({vol.Required("type"): f"{DOMAIN}/refresh_positions", vol.Optional("entry_id"): str})
+@websocket_api.require_admin
 @websocket_api.async_response
 async def ws_refresh_positions(hass, connection, msg):
     mgr = _manager(hass, msg.get("entry_id"))
@@ -114,6 +120,7 @@ async def ws_refresh_positions(hass, connection, msg):
 
 
 @websocket_api.websocket_command({vol.Required("type"): f"{DOMAIN}/reset", vol.Optional("entry_id"): str})
+@websocket_api.require_admin
 @callback
 def ws_reset(hass, connection, msg):
     mgr = _manager(hass, msg.get("entry_id"))
@@ -124,6 +131,7 @@ def ws_reset(hass, connection, msg):
 @websocket_api.websocket_command(
     {vol.Required("type"): f"{DOMAIN}/run", vol.Optional("entry_id"): str, vol.Required("running"): bool}
 )
+@websocket_api.require_admin
 @websocket_api.async_response
 async def ws_run(hass, connection, msg):
     mgr = _manager(hass, msg.get("entry_id"))
@@ -138,6 +146,7 @@ async def ws_run(hass, connection, msg):
         vol.Optional("count", default=20): vol.All(int, vol.Range(min=5, max=50)),
     }
 )
+@websocket_api.require_admin
 @websocket_api.async_response
 async def ws_connection_test(hass, connection, msg):
     mgr = _manager(hass, msg.get("entry_id"))

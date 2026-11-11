@@ -61,7 +61,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             module_url=f"{STATIC_URL}/panel.js?v=18",
             sidebar_title="Halo Sync",
             sidebar_icon="mdi:television-ambient-light",
-            require_admin=False,
+            require_admin=True,
             config={"entry_id": entry.entry_id},
         )
     return True
