@@ -1,4 +1,13 @@
-# Ambilight TV + Hue Sync
+# Halo Sync
+
+## Fork
+
+Halo Sync is a fork of [MadDinu93/ambilight-tv-hue-sync](https://github.com/MadDinu93/ambilight-tv-hue-sync),
+based on its release v0.5.7. Many thanks to MadDinu93 for the original integration, its DTLS client and the
+analysis of the TV's own Ambilight+Hue behaviour. Halo Sync uses its own domain (`halo_sync`), so it can be installed
+next to the original without conflicts. See [NOTICE.md](NOTICE.md) for origin and license.
+
+## About
 
 Home Assistant integration that streams the colours of a **Philips Ambilight Android / Google TV** to the lights of a
 **Philips Hue Entertainment area**, with low latency (50 Hz) and a sidebar panel with presets.
@@ -23,7 +32,7 @@ That removes the ~1 s lag of REST-based setups, which are limited by the bridge 
 - Optional **non-Hue lights** per preset (any `light.*` entity), driven with a rate-limited `light.turn_on` and restored to their previous state when the stream stops.
 - Entities: a `switch` to start/stop the stream, a `select` for the active preset, sensors for the average screen colour and the active TV input, a button to refresh the light positions.
 - A built-in **connection test** (ping the TV, time the Ambilight request, probe the Hue bridge) that shows what delay to expect from your network.
-- Service `ambilight_hue_stream.activate_preset` for automations.
+- Service `halo_sync.activate_preset` for automations.
 
 ## Screenshots
 
@@ -60,16 +69,16 @@ Tuning sliders and the light positions on a 16:9 screen:
 ### Home Assistant Marketplace / HACS
 
 1. Open the **Marketplace** (HACS on older Home Assistant versions), add a **custom repository**:
-   `https://github.com/MadDinu93/ambilight-tv-hue-sync` (type *Integration*).
-2. Install **Ambilight TV + Hue Sync** and restart Home Assistant.
+   `https://github.com/syn-ack-syn/ha-halo-sync` (type *Integration*).
+2. Install **Halo Sync** and restart Home Assistant.
 
 ### Manual
 
-Copy `custom_components/ambilight_hue_stream` into your Home Assistant `config/custom_components` folder and restart.
+Copy `custom_components/halo_sync` into your Home Assistant `config/custom_components` folder and restart.
 
 ## Setup
 
-1. **Settings → Devices & services → Add integration → Ambilight TV + Hue Sync**.
+1. **Settings → Devices & services → Add integration → Halo Sync**.
 2. The setup screen scans your network for a few seconds and lists the **compatible TVs and Hue bridges** it finds, with their names, so you
    can just pick them. **Switch the TV on first**, otherwise it does not answer. If something is missing or you prefer to, type the IP
    address instead (a typed address overrides the selection), or tick *Scan the network again* and submit. A **PIN** then appears on the TV;
@@ -82,7 +91,7 @@ Copy `custom_components/ambilight_hue_stream` into your Home Assistant `config/c
 3. Press the **link button** on the Hue bridge and submit within 30 seconds.
 4. Pick the **Entertainment area** to stream to. Position the lights in that area with the Hue app
    (the panel shows their positions and uses them to decide what each light follows).
-5. Open **Ambilight TV + Hue Sync** in the sidebar, choose a preset and press **Start**.
+5. Open **Halo Sync** in the sidebar, choose a preset and press **Start**.
 
 ## Network and delay
 
@@ -137,7 +146,7 @@ The same TV on 2.4 GHz Wi-Fi measured roughly 280 ms ping with a 6 Mbit/s link, 
 ### Automations
 
 ```yaml
-action: ambilight_hue_stream.activate_preset
+action: halo_sync.activate_preset
 data:
   preset: Game
 ```
@@ -154,7 +163,7 @@ The TV's own Ambilight+Hue is compared the way it is designed to work. Philips' 
 so the table assumes that path works. On the tested TV it does not (see the note under the table), but the processing delay I decoded from
 its firmware applies either way.
 
-| | Ambilight TV + Hue Sync (this) | The TV's built-in Ambilight+Hue (assuming Entertainment streaming) | REST-based integrations | HDMI capture (HyperHDR / Hyperion) | Hue HDMI Sync Box |
+| | Halo Sync (this) | The TV's built-in Ambilight+Hue (assuming Entertainment streaming) | REST-based integrations | HDMI capture (HyperHDR / Hyperion) | Hue HDMI Sync Box |
 |---|---|---|---|---|---|
 | Colours come from | The TV's Ambilight measurement (about 25 reads/s) | The TV's own algorithm | The TV's Ambilight data | A capture card on the HDMI signal | The HDMI signal passing through the box |
 | How lights are driven | Hue Entertainment (UDP), 50 Hz | Hue Entertainment; on the tested TV it falls back to one REST command per light† | One REST command per light | Hue Entertainment | Hue Entertainment |

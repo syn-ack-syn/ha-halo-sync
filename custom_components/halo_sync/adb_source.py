@@ -44,7 +44,7 @@ class AdbSource:
         self.source: str | None = None
 
     def start(self) -> None:
-        self._task = self.hass.async_create_background_task(self._run(), "ambilight_hue_stream_adb")
+        self._task = self.hass.async_create_background_task(self._run(), "halo_sync_adb")
 
     async def stop(self) -> None:
         if self._task:
