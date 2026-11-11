@@ -23,6 +23,7 @@ MODES = ("smooth", "nearest", "some", "side", "native")
 POSITIONS = [(-1.0, 0.0), (0.0, 1.0), (1.0, 0.0), (0.0, -1.0), (-1.0, -1.0), (1.0, 1.0), (0.0, 0.0)]
 SAMPLES = sorted(DIR.glob("measured_*.json")) + sorted(DIR.glob("processed_*.json"))
 IP_RE = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
+MAC_RE = re.compile(r"\b[0-9a-f]{2}([:-])[0-9a-f]{2}(?:\1[0-9a-f]{2}){4}\b", re.IGNORECASE)
 
 
 def _load(path) -> dict:
@@ -56,7 +57,8 @@ def test_powerstate_on():
 def test_system_is_anonymised():
     system = _load(DIR / "system.json")
     assert set(system) <= {"api_version", "model"}
-    assert "55PUS7373" in system["model"]
+    if "model" in system:  # the 2018 firmware sends the model only encrypted, then it is left out
+        assert "55PUS7373" in system["model"]
     assert int(system["api_version"]["Major"]) == 6
 
 
@@ -97,6 +99,7 @@ def test_no_personal_data_in_fixtures():
     for f in files:
         text = f.read_text()
         assert not IP_RE.search(text), f"IP address in {f.name}"
+        assert not MAC_RE.search(text), f"MAC address in {f.name}"
         low = text.lower()
         for word in ("serialnumber", "user", "password"):
             assert word not in low, f"{word!r} in {f.name}"

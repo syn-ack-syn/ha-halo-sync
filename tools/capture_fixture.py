@@ -8,7 +8,8 @@ Usage (TV on, Ambilight running, a video playing for the timing part):
 
 Writes into the output directory (default tests/fixtures/55pus7373/):
 
-    system.json            only api_version and model from /6/system
+    system.json            only api_version and, if sent in plain text, model from /6/system
+                           (2018 sets send model and serial number only as *_encrypted, dropped)
     powerstate_on.json     /6/powerstate
     topology.json          /6/ambilight/topology
     measured_NN.json       20 samples of /6/ambilight/measured, 100 ms apart
@@ -16,9 +17,14 @@ Writes into the output directory (default tests/fixtures/55pus7373/):
     timing.json            response times and change rate per endpoint
 
 The TV API is fragile: every request goes through one requests.Session (keep-alive), requests
-are never run in parallel, the rate is capped and failures back off with a growing pause.
-Host, user and password are read from the environment only and never written anywhere; the
-script refuses to finish if any of them shows up in an output file.
+are never run in parallel, any two requests start at least 100 ms apart and failures back off
+with a growing pause. A 401 stops at once without retrying.
+
+Everything is first written to a temporary directory next to the output directory and checked
+for personal data (IP or MAC addresses, "serialnumber", "user", "password", the host and the
+credentials). Only if that check passes does the temporary directory replace the output
+directory; otherwise it is deleted and the script exits with a non-zero code. Host, user and
+password are read from the environment only and never written to files or printed.
 """
 
 from __future__ import annotations
@@ -28,7 +34,9 @@ import json
 import math
 import os
 import re
+import shutil
 import statistics
+import tempfile
 import sys
 import time
 from dataclasses import dataclass
@@ -41,6 +49,7 @@ TIMEOUT_S = 5.0
 FIXTURE_SAMPLES = 20
 FIXTURE_INTERVAL_S = 0.1
 MAX_HZ = 10.0
+MIN_GAP_S = 1 / MAX_HZ  # between the starts of any two requests, across all endpoints
 BACKOFF_START_S = 0.5
 BACKOFF_MAX_S = 30.0
 MAX_CONSECUTIVE_ERRORS = 6
@@ -49,6 +58,7 @@ ENDPOINTS = ("measured", "processed")
 DEFAULT_OUT = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "55pus7373"
 
 IP_RE = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
+MAC_RE = re.compile(r"\b[0-9a-f]{2}([:-])[0-9a-f]{2}(?:\1[0-9a-f]{2}){4}\b", re.IGNORECASE)
 FORBIDDEN_WORDS = ("serialnumber", "user", "password")
 
 
@@ -64,7 +74,7 @@ class Sample:
 
 
 def anonymize_system(system: dict) -> dict:
-    """Keep only the fields the tests need; serial number, names and ids are dropped."""
+    """Keep api_version and a plain-text model; serial number, names, ids and *_encrypted are dropped."""
     return {k: system[k] for k in SYSTEM_KEEP if k in system}
 
 
@@ -144,13 +154,21 @@ class Capture:
         self.log = log
         self._pause = BACKOFF_START_S
         self._errors = 0
+        self._next_allowed = -math.inf
 
-    def _get(self, path: str) -> tuple[Any, float]:
+    def _get(self, path: str) -> tuple[Any, float, float]:
+        """One request: (body, response time in ms, start time). Keeps MIN_GAP_S to the previous one."""
+        now = self.clock()
+        if self._next_allowed > now:
+            self.sleep(self._next_allowed - now)
         t0 = self.clock()
+        self._next_allowed = t0 + MIN_GAP_S
         resp = self.session.get(f"{self.base_url}{path}", timeout=TIMEOUT_S)
+        if getattr(resp, "status_code", None) == 401:
+            raise CaptureError("authentication failed")
         resp.raise_for_status()
         body = resp.json()
-        return body, (self.clock() - t0) * 1000
+        return body, (self.clock() - t0) * 1000, t0
 
     def _failed(self, path: str, err: Exception) -> None:
         self._errors += 1
@@ -168,7 +186,9 @@ class Capture:
         """One request, retried with a growing pause until it succeeds or we give up."""
         while True:
             try:
-                body, _ = self._get(path)
+                body, _, _ = self._get(path)
+            except CaptureError:
+                raise
             except Exception as err:  # noqa: BLE001 - any failure of the TV is retried the same way
                 self._failed(path, err)
                 continue
@@ -193,28 +213,30 @@ class Capture:
             if due > now:
                 self.sleep(due - now)
                 now = self.clock()
-            t = now - start
             try:
-                body, ms = self._get(path)
+                body, ms, t0 = self._get(path)
+            except CaptureError:
+                raise
             except Exception as err:  # noqa: BLE001
-                out.append(Sample(t, None))
+                out.append(Sample(now - start, None))
                 self._failed(path, err)
                 due = self.clock()
                 continue
             self._ok()
-            out.append(Sample(t, ms, body))
+            out.append(Sample(t0 - start, ms, body))
             due = max(due + interval, self.clock())
         return out
 
 
 def check_no_leaks(out_dir: Path, secrets: list[str]) -> list[str]:
-    """Names of files that contain an IP address, a forbidden word or one of the secrets."""
+    """Names of files that contain an IP or MAC address, a forbidden word or one of the secrets."""
     bad = []
     for f in sorted(out_dir.glob("*.json")):
         text = f.read_text()
         low = text.lower()
         if (
             IP_RE.search(text)
+            or MAC_RE.search(text)
             or any(w in low for w in FORBIDDEN_WORDS)
             or any(s and s.lower() in low for s in secrets)
         ):
@@ -235,7 +257,29 @@ def capture(
     secrets: list[str],
     today: str | None = None,
 ) -> dict:
-    out_dir.mkdir(parents=True, exist_ok=True)
+    """Capture into a temporary sibling of out_dir and move it into place only if it is clean."""
+    out_dir = Path(out_dir)
+    out_dir.parent.mkdir(parents=True, exist_ok=True)
+    tmp = Path(tempfile.mkdtemp(prefix=f".{out_dir.name}.tmp-", dir=out_dir.parent))
+    try:
+        timing = _capture_into(cap, tmp, dauer=dauer, hz=hz, today=today)
+        bad = check_no_leaks(tmp, secrets)
+        if bad:
+            raise CaptureError(f"possible personal data in {', '.join(bad)}, nothing was written")
+        old = None
+        if out_dir.exists():
+            old = Path(tempfile.mkdtemp(prefix=f".{out_dir.name}.old-", dir=out_dir.parent))
+            os.replace(out_dir, old / out_dir.name)
+        os.replace(tmp, out_dir)
+        if old is not None:
+            shutil.rmtree(old)
+    except BaseException:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
+    return timing
+
+
+def _capture_into(cap: Capture, out_dir: Path, *, dauer: float, hz: float, today: str | None) -> dict:
 
     system = cap.get("/6/system")
     _write(out_dir / "system.json", anonymize_system(system))
@@ -268,10 +312,6 @@ def capture(
         "video": video,
     }
     _write(out_dir / "timing.json", timing)
-
-    bad = check_no_leaks(out_dir, secrets)
-    if bad:
-        raise CaptureError(f"possible personal data in {', '.join(bad)}, check and delete before committing")
     return timing
 
 
