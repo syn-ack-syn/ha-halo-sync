@@ -126,7 +126,9 @@ class HaloSyncPanel extends HTMLElement {
 
   // ---------- actions ----------
   async _toggleRun() { this._apply(await this._msg("run", { running: !this._state.running })); }
-  async _setAutoResume(enabled) { this._apply(await this._msg("auto_resume", { enabled })); }
+  async _setAutoResume(enabled) {
+    try { this._apply(await this._msg("auto_resume", { enabled })); } catch (e) { console.error("Halo Sync: auto resume", e); this._renderStatus(); }
+  }
   async _activate(id) { this._editId = id; this._apply(await this._msg("activate", { preset: id })); }
   _edit(id) { this._editId = id; this._draft = structuredClone(this._state.presets[id]); this._selLight = 0; this._render(); }
 
@@ -192,7 +194,7 @@ class HaloSyncPanel extends HTMLElement {
         ${s.tv_style ? `<div class="kv"><span>TV Ambilight</span><b>${s.tv_style.category === "off" ? "Off" : s.tv_style.category === "video" ? "Follow video · " + esc(s.tv_style.name) : s.tv_style.category === "audio" ? "Music (shown as Standard)" : "Fixed color (shown as warm white)"}</b></div>` : ""}
         <div class="kv"><span>TV reads</span><b>${st.tv_reads_per_s ? `${st.tv_reads_per_s}/s · ${st.tv_read_median_ms} ms` : "—"}</b></div>
       </div>
-      <label class="toggle"><input type="checkbox" id="autoresume" ${s.auto_resume ? "checked" : ""}> Auto resume</label>
+      <label class="toggle"><input type="checkbox" id="autoresume" ${s.auto_resume ? "checked" : ""} ${s.auto_resume === undefined ? "disabled" : ""}> Auto resume</label>
       <small class="toggle-hint">Restarts the stream when the TV turns back on after standby.</small>`;
     el.querySelector("#run").onclick = () => this._toggleRun();
     el.querySelector("#autoresume").onchange = (e) => this._setAutoResume(e.target.checked);
