@@ -8,7 +8,8 @@ import logging
 import re
 import time
 
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.const import EVENT_HOMEASSISTANT_STOP
+from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.storage import Store
 
@@ -196,11 +197,27 @@ class Manager:
     @callback
     def _on_reader_change(self) -> None:
         self.notify()
+        self._maybe_resume()
+
+    @callback
+    def _maybe_resume(self) -> None:
         if self._unloading:
             return
         if self.resume.should_start(self.reader.state, self.streamer.running, time.monotonic()):
             _LOGGER.info("Halo Sync: TV is back, resuming the stream")
-            self.hass.async_add_executor_job(self.streamer.start)
+            self.hass.async_create_task(self._async_resume())
+
+    async def _async_resume(self) -> None:
+        await self.hass.async_add_executor_job(self.streamer.start)
+        # A start that failed before _on_streamer_change saw it running never reached stream_ended there.
+        if (
+            not self.streamer.running
+            and not self._was_running
+            and not self._unloading
+            and self.resume.stream_ended(self.streamer.stop_reason)
+        ):
+            self._save()
+            self.notify()
 
     @callback
     def _on_streamer_change(self) -> None:
@@ -215,6 +232,8 @@ class Manager:
                 self.hass.async_create_task(self._stop_extra())
                 if not self._unloading and self.resume.stream_ended(self.streamer.stop_reason):
                     self._save()
+                    # The reader may have reported "ok" before this callback; that change would be lost.
+                    self._maybe_resume()
         self.notify()
 
     def status(self) -> dict:
@@ -300,13 +319,23 @@ class Manager:
             self.notify()
 
     async def async_shutdown(self) -> None:
-        """Stop for an unload or HA restart: a stream that was running or waiting resumes afterwards."""
+        """Stop for a reload or disable of the entry: a stream that was running or waiting resumes afterwards.
+
+        HA stopping does not unload the entry; that path is _async_on_ha_stop.
+        """
+        await self._async_persist_resume()
+        await self.hass.async_add_executor_job(self.streamer.stop, True)
+
+    async def _async_on_ha_stop(self, event: Event) -> None:
+        await self._async_persist_resume()
+
+    async def _async_persist_resume(self) -> None:
+        """Mark a running or waiting stream as pending and save it now; not a manual stop."""
         self._unloading = True
         if self.resume.enabled and (self.resume.pending or self.streamer.running):
             self.resume.pending = True
-        # A delayed save is not reliably written while unloading.
+        # A delayed save is not reliably written while unloading or stopping.
         await self._store.async_save(self._data())
-        await self.hass.async_add_executor_job(self.streamer.stop, True)
 
     async def async_set_auto_resume(self, enabled: bool) -> None:
         if self.resume.set_enabled(enabled):
@@ -360,6 +389,7 @@ class Manager:
     def start_color_poll(self) -> None:
         self.reader.start()
         self.entry.async_on_unload(self._async_stop_reader)
+        self.entry.async_on_unload(self.hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, self._async_on_ha_stop))
         self.entry.async_create_background_task(self.hass, self._color_loop(), f"{DOMAIN}_tv_color")
         self.entry.async_create_background_task(self.hass, self._tv_style_loop(), f"{DOMAIN}_tv_style")
         self.entry.async_create_background_task(self.hass, self._channel_refresh_loop(), f"{DOMAIN}_channels")

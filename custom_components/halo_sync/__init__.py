@@ -58,7 +58,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             hass,
             webcomponent_name="halo-sync-panel",
             frontend_url_path=PANEL_URL,
-            module_url=f"{STATIC_URL}/panel.js?v=18",
+            module_url=f"{STATIC_URL}/panel.js?v=19",
             sidebar_title="Halo Sync",
             sidebar_icon="mdi:television-ambient-light",
             require_admin=True,
