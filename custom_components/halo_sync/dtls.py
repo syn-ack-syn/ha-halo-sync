@@ -26,6 +26,7 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 VERSION = b"\xfe\xfd"  # DTLS 1.2
+VERSION_10 = b"\xfe\xff"  # DTLS 1.0, allowed on the record of a HelloVerifyRequest (RFC 6347 4.2.1)
 SUITE = b"\x00\xa8"  # TLS_PSK_WITH_AES_128_GCM_SHA256
 CT_CCS, CT_ALERT, CT_HANDSHAKE, CT_APPDATA = 20, 21, 22, 23
 HT_CLIENT_HELLO, HT_SERVER_HELLO, HT_HELLO_VERIFY = 1, 2, 3
@@ -38,6 +39,7 @@ VERIFY_DATA_LEN = 12
 RETRANSMIT_S = 0.5  # first wait for an answer; doubles with every retransmission of the flight
 FLIGHT_ATTEMPTS = 3  # transmissions of one flight before the handshake gives up
 RECV_SIZE = 4096
+EARLY_RECORDS = 4  # epoch 1 records kept while the server's ChangeCipherSpec is still missing
 
 ALERT_NAMES = {
     0: "close_notify", 10: "unexpected_message", 20: "bad_record_mac", 22: "record_overflow",
@@ -92,20 +94,20 @@ def _verify_data(master: bytes, label: bytes, transcript: bytes) -> bytes:
 
 
 # ---- parsing ---------------------------------------------------------------
-def _parse_records(data: bytes) -> list[tuple[int, int, bytes, bytes]]:
-    """Split a datagram into (type, epoch, seq_num (epoch + sequence, 8 bytes), fragment)."""
+def _parse_records(data: bytes) -> list[tuple[int, bytes, int, bytes, bytes]]:
+    """Split a datagram into (type, version, epoch, seq_num (epoch + sequence, 8 bytes), fragment)."""
     out, pos = [], 0
     while pos < len(data):
         if len(data) - pos < RECORD_HEADER:
             raise DTLSError("truncated record header")
-        ctype = data[pos]
+        ctype, version = data[pos], data[pos + 1 : pos + 3]
         seqnum = data[pos + 3 : pos + 11]
         epoch = struct.unpack(">H", data[pos + 3 : pos + 5])[0]
         length = struct.unpack(">H", data[pos + 11 : pos + 13])[0]
         end = pos + RECORD_HEADER + length
         if end > len(data):
             raise DTLSError("record length exceeds datagram")
-        out.append((ctype, epoch, seqnum, data[pos + RECORD_HEADER : end]))
+        out.append((ctype, version, epoch, seqnum, data[pos + RECORD_HEADER : end]))
         pos = end
     return out
 
@@ -176,6 +178,7 @@ class DTLSClient:
         self.seq = {0: 0, 1: 0}
         self.msg_seq = 0
         self.write: tuple[bytes, bytes] | None = None
+        self.read: tuple[bytes, bytes] | None = None  # server key and IV once the handshake is done
         self.connected = False
 
     # ---- records -------------------------------------------------------
@@ -209,7 +212,7 @@ class DTLSClient:
         self.msg_seq += 1
         return msg
 
-    def _exchange(self, send_flight: Callable[[], None], on_record: Callable[[int, int, bytes, bytes], bool]) -> None:
+    def _exchange(self, send_flight: Callable[[], None], on_record: Callable[[int, bytes, int, bytes, bytes], bool]) -> None:
         """Send a flight and feed the answers to `on_record` until it returns True.
 
         The flight is retransmitted after RETRANSMIT_S, then after twice that, and so on, up to
@@ -236,6 +239,12 @@ class DTLSClient:
 
     # ---- handshake -----------------------------------------------------
     def connect(self) -> None:
+        """Run the handshake; raises DTLSError (DTLSAlert for an alert) or OSError.
+
+        Two or three flights are exchanged (ClientHello, ClientHello with cookie if asked for,
+        final flight). Each waits at most min(timeout, 0.5 + 1 + 2 s), so connect() returns or
+        raises within 3 * min(timeout, 3.5 s) plus processing time.
+        """
         # All 32 bytes random: gmt_unix_time need not be a real clock (RFC 5246 section 7.4.1.2).
         client_random = os.urandom(32)
 
@@ -248,12 +257,19 @@ class DTLSClient:
         state: dict = {"cookie": None, "done": None}
         ch = self._handshake(HT_CLIENT_HELLO, client_hello(b""))
 
-        def on_hello(ctype: int, epoch: int, seqnum: bytes, frag: bytes) -> bool:
-            if ctype == CT_ALERT and epoch == 0:
-                raise _parse_alert(frag)
-            if ctype != CT_HANDSHAKE or epoch != 0:
+        def on_hello(ctype: int, version: bytes, epoch: int, seqnum: bytes, frag: bytes) -> bool:
+            if epoch != 0:
                 return False
-            for htype, mseq, msg, body in _parse_handshakes(frag):
+            if version not in (VERSION, VERSION_10):
+                raise DTLSError(f"unexpected record version {version.hex()}")
+            if ctype == CT_ALERT:
+                raise _parse_alert(frag)
+            if ctype != CT_HANDSHAKE:
+                return False
+            msgs = _parse_handshakes(frag)
+            if version != VERSION and any(m[0] != HT_HELLO_VERIFY for m in msgs):
+                raise DTLSError(f"unexpected record version {version.hex()}")
+            for htype, mseq, msg, body in msgs:
                 if htype == HT_HELLO_VERIFY:
                     # Only an answer to the cookie-less ClientHello counts. Later copies are replies
                     # to retransmitted first ClientHellos and are dropped (a rejected cookie ends in
@@ -306,23 +322,17 @@ class DTLSClient:
             self.epoch, self.write = 1, (client_key, client_iv)
             self.sock.send(out + self._record(CT_HANDSHAKE, fin_msg))
 
-        # Flight 6: the server's ChangeCipherSpec, then its Finished in epoch 1.
+        # Flight 6: the server's ChangeCipherSpec, then its Finished in epoch 1. Epoch 1 records that
+        # arrive before the CCS (reordered or CCS lost) are kept, a few at most, and only looked at
+        # once the CCS is there; without a CCS the handshake never completes (it times out).
         ccs = {"seen": False}
+        early: list[tuple[int, bytes, bytes]] = []
 
-        def on_final(ctype: int, epoch: int, seqnum: bytes, frag: bytes) -> bool:
-            if epoch == 0:
-                if ctype == CT_ALERT:
-                    raise _parse_alert(frag)
-                if ctype == CT_CCS:
-                    if frag != b"\x01":
-                        raise DTLSError("malformed ChangeCipherSpec")
-                    ccs["seen"] = True
-                return False  # epoch-0 handshake records here are retransmitted server flights
-            if epoch != 1:
-                return False
-            if not ccs["seen"]:
-                raise DTLSError("bridge sent an epoch 1 record before ChangeCipherSpec")
-            plain = self._decrypt(server_key, server_iv, ctype, seqnum, frag)
+        def on_epoch1(ctype: int, seqnum: bytes, frag: bytes) -> bool:
+            try:
+                plain = self._decrypt(server_key, server_iv, ctype, seqnum, frag)
+            except DTLSError:
+                return False  # RFC 6347 4.1.2.1: invalid records are dropped silently
             if ctype == CT_ALERT:
                 raise _parse_alert(plain)
             if ctype != CT_HANDSHAKE:
@@ -334,8 +344,30 @@ class DTLSClient:
                 raise DTLSError("server finished mismatch")
             return True
 
+        def on_final(ctype: int, version: bytes, epoch: int, seqnum: bytes, frag: bytes) -> bool:
+            if epoch == 0:
+                if version != VERSION:
+                    raise DTLSError(f"unexpected record version {version.hex()}")
+                if ctype == CT_ALERT:
+                    raise _parse_alert(frag)
+                if ctype == CT_CCS and not ccs["seen"]:
+                    if frag != b"\x01":
+                        raise DTLSError("malformed ChangeCipherSpec")
+                    ccs["seen"] = True
+                    pending, early[:] = list(early), []
+                    return any(on_epoch1(*rec) for rec in pending)
+                return False  # epoch-0 handshake records here are retransmitted server flights
+            if epoch != 1 or version != VERSION:
+                return False  # dropped like an invalid record
+            if not ccs["seen"]:
+                if len(early) < EARLY_RECORDS:
+                    early.append((ctype, seqnum, frag))
+                return False
+            return on_epoch1(ctype, seqnum, frag)
+
         self._exchange(send_final, on_final)
         self.sock.settimeout(None)
+        self.read = (server_key, server_iv)
         self.connected = True
 
     @staticmethod
@@ -344,9 +376,37 @@ class DTLSClient:
         hello = [m for m, (t, _, _) in server.items() if t == HT_SERVER_HELLO]
         return bool(hello) and all(m in server for m in range(min(hello), done + 1))
 
+    def _drain(self) -> None:
+        """Read whatever the bridge sent since the last call, without blocking.
+
+        Hue sends nothing during a stream except alerts (close_notify when it ends the session, a
+        fatal alert on errors); those raise DTLSAlert. Records that do not decrypt, carry another
+        version or epoch, or do not parse are dropped silently (RFC 6347 4.1.2.1).
+        """
+        key, iv = self.read
+        while True:
+            try:
+                data = self.sock.recv(RECV_SIZE, socket.MSG_DONTWAIT)
+            except (BlockingIOError, InterruptedError):
+                return
+            try:
+                records = _parse_records(data)
+            except DTLSError:
+                continue
+            for ctype, version, epoch, seqnum, frag in records:
+                if epoch != 1 or version != VERSION or ctype != CT_ALERT:
+                    continue
+                try:
+                    alert = _parse_alert(self._decrypt(key, iv, ctype, seqnum, frag))
+                except DTLSError:
+                    continue
+                raise alert
+
     def send(self, payload: bytes) -> None:
+        """Send one application data record; raises DTLSAlert if the bridge sent an alert meanwhile."""
         if not self.connected:
             raise DTLSError("not connected")
+        self._drain()
         self.sock.send(self._record(CT_APPDATA, payload))
 
     def close(self) -> None:

@@ -12,7 +12,7 @@ from collections.abc import Callable
 import requests
 
 from .const import CHROMA_FULL_LEVEL, DARK_CONTENT_LEVELS, DARK_LEVEL, SEND_HZ, TV_GIVEUP_S
-from .dtls import DTLSClient, DTLSError
+from .dtls import DTLSAlert, DTLSClient, DTLSError
 from .tv_reader import TvReader
 from .zones import ZoneSampler
 
@@ -24,6 +24,9 @@ RESTORE_FADE_S = 0.8
 FADE_IN_S = 0.8  # crossfade from the lights' own color to the streamed one when a session starts
 RECONNECT_FIRST_S = 1.0  # pause before the first reconnect after the DTLS session broke
 RECONNECT_MAX_S = 30.0
+RECONNECT_TIMEOUT_S = 2.0  # DTLS timeout per flight while reconnecting, so a stop is not held up long
+SESSION_CHECK_S = 10.0  # how often the bridge is asked whether our entertainment session is still active
+ALERT_FATAL = 2
 
 
 def next_reconnect_pause(pause: float) -> float:
@@ -351,19 +354,40 @@ class Streamer:
                     if not self.running:  # the bridge may still be settling from the stream; repeat once
                         self._restore_lights(snap)
 
-    def _open_link(self) -> DTLSClient:
-        """Start the entertainment area on the bridge and open the DTLS session to it."""
+    def _open_link(self, timeout: float = 5.0) -> DTLSClient | None:
+        """Start the entertainment area on the bridge and open the DTLS session to it.
+
+        Returns None without a handshake if the stream was stopped meanwhile.
+        """
         cfg = self.cfg
         r = requests.put(self._cfg_url, json={"action": "start"}, headers=self._hue_headers, verify=False, timeout=5)
         if r.status_code != 200:
             raise RuntimeError(f"bridge refused to start the entertainment area: {r.status_code} {r.text}")
-        client = DTLSClient(cfg["hue_host"], 2100, cfg["hue_appid"], bytes.fromhex(cfg["hue_clientkey"]))
+        if self._stop.is_set():
+            return None
+        client = DTLSClient(cfg["hue_host"], 2100, cfg["hue_appid"], bytes.fromhex(cfg["hue_clientkey"]), timeout)
         try:
             client.connect()
         except BaseException:
             client.close()
             raise
         return client
+
+    def _session_active(self) -> bool | None:
+        """Whether the bridge still streams our session (CLIP v2); None if the answer is unusable.
+
+        The area must be "active" and, where the bridge names it, its active_streamer must be our
+        application id (the PSK identity), not another app that took the area over.
+        """
+        try:
+            data = requests.get(self._cfg_url, headers=self._hue_headers, verify=False, timeout=2).json()["data"][0]
+            if data.get("status") != "active":
+                return False
+            streamer = data.get("active_streamer")
+            return streamer is None or streamer.get("rid") == self.cfg["hue_appid"]
+        except (requests.RequestException, KeyError, IndexError, ValueError, TypeError, AttributeError) as exc:
+            _LOGGER.debug("Could not read the entertainment area status: %s", exc)
+            return None
 
     def _set_link(self, link: str, reason: str | None = None) -> None:
         """Report the bridge connection state through on_change (and the stats the entities show)."""
@@ -406,7 +430,19 @@ class Streamer:
         # A failure here ends the session with an error (wrong key, bridge busy); only a session
         # that was up reconnects by itself.
         client: DTLSClient | None = self._open_link()
+        if client is None:
+            return  # stopped while the bridge started the area; _run cleans up
         pause, retry_at = RECONNECT_FIRST_S, 0.0
+        check_at = time.monotonic() + SESSION_CHECK_S
+
+        def drop_link(reason: str) -> None:
+            nonlocal client, retry_at
+            _LOGGER.warning("Halo Sync lost the bridge connection, reconnecting in %.0f s: %s", pause, reason)
+            client.close()
+            client = None
+            retry_at = time.monotonic() + pause
+            self._set_link("reconnecting", reason)
+
         _LOGGER.info("Halo Sync started (%d channels)", len(chans))
 
         ent_id = cfg["entertainment_id"].encode()
@@ -423,21 +459,36 @@ class Streamer:
                 if client is None and mono >= retry_at:
                     # Restart the entertainment area as well: the bridge may still hold it for the
                     # broken session. The reader keeps its full rate meanwhile (fast stays set).
+                    # Every blocking step checks for a stop first; _run then cleans up.
                     try:
                         requests.put(self._cfg_url, json={"action": "stop"}, headers=self._hue_headers, verify=False, timeout=5)
                     except requests.RequestException:
                         pass
+                    if self._stop.is_set():
+                        break
                     try:
-                        client = self._open_link()
+                        client = self._open_link(RECONNECT_TIMEOUT_S)
+                        if client is None:
+                            break
                     except (DTLSError, OSError, RuntimeError) as exc:
+                        if isinstance(exc, DTLSAlert) and exc.level == ALERT_FATAL:
+                            # The bridge refuses us (unknown identity, wrong key): retrying cannot help.
+                            raise RuntimeError(f"bridge rejected the reconnect: {exc}") from exc
                         pause = next_reconnect_pause(pause)
                         retry_at = time.monotonic() + pause
                         _LOGGER.warning("Halo Sync could not reconnect to the bridge (next try in %.0f s): %s", pause, exc)
                         self._set_link("reconnecting", str(exc))
                     else:
                         pause = RECONNECT_FIRST_S
+                        check_at = time.monotonic() + SESSION_CHECK_S
                         _LOGGER.info("Halo Sync reconnected to the bridge")
                         self._set_link("connected")
+                elif client is not None and mono >= check_at:
+                    # A session the bridge ended quietly (another app, bridge restart) sends no
+                    # error; ask the bridge every SESSION_CHECK_S.
+                    check_at = mono + SESSION_CHECK_S
+                    if self._session_active() is False:
+                        drop_link("the bridge no longer streams this session")
                 if tv.state == "standby":
                     standby_since = mono if standby_since is None else standby_since
                     if mono - standby_since > TV_GIVEUP_S:
@@ -480,15 +531,11 @@ class Streamer:
                         struct.pack(">BHHH", c["id"], *[min(65535, int(v * 65535)) for v in cur[j]])
                         for j, c in enumerate(chans)
                     )
-                    if client is not None:
+                    if client is not None and not self._stop.is_set():
                         try:
                             client.send(b"HueStream" + bytes([2, 0, seq & 255, 0, 0, 0, 0]) + ent_id + body)
-                        except (DTLSError, OSError) as exc:
-                            _LOGGER.warning("Halo Sync lost the bridge connection, reconnecting in %.0f s: %s", pause, exc)
-                            client.close()
-                            client = None
-                            retry_at = time.monotonic() + pause
-                            self._set_link("reconnecting", str(exc))
+                        except (DTLSError, OSError) as exc:  # includes alerts the bridge sent (close_notify)
+                            drop_link(str(exc))
                         else:
                             seq += 1
                 if latest["extra"]:
