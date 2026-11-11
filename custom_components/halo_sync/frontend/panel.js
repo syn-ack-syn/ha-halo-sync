@@ -126,6 +126,7 @@ class HaloSyncPanel extends HTMLElement {
 
   // ---------- actions ----------
   async _toggleRun() { this._apply(await this._msg("run", { running: !this._state.running })); }
+  async _setAutoResume(enabled) { this._apply(await this._msg("auto_resume", { enabled })); }
   async _activate(id) { this._editId = id; this._apply(await this._msg("activate", { preset: id })); }
   _edit(id) { this._editId = id; this._draft = structuredClone(this._state.presets[id]); this._selLight = 0; this._render(); }
 
@@ -179,16 +180,22 @@ class HaloSyncPanel extends HTMLElement {
     if (!el) return;
     const s = this._state;
     const st = s.stats || {};
+    const waiting = !s.running && s.resume_pending;
     el.innerHTML = `
       <div class="status">
         <button class="run ${s.running ? "on" : ""}" id="run">${s.running ? "■ Stop" : "▶ Start"}</button>
-        <div class="kv"><span>Status</span><b class="${s.error ? "err" : ""}">${s.running ? "Streaming" : s.error ? "Stopped: " + esc(s.error) : "Stopped"}</b></div>
+        <div class="kv"><span>Status</span>${waiting
+          ? `<b>Waiting for TV (auto resume)</b>`
+          : `<b class="${s.error ? "err" : ""}">${s.running ? "Streaming" : s.error ? "Stopped: " + esc(s.error) : "Stopped"}</b>`}</div>
         <div class="kv"><span>Active preset</span><b>${esc(s.presets[s.active]?.name)}</b></div>
         <div class="kv"><span>TV source</span><b>${esc(s.tv_source ?? "—")}</b></div>
         ${s.tv_style ? `<div class="kv"><span>TV Ambilight</span><b>${s.tv_style.category === "off" ? "Off" : s.tv_style.category === "video" ? "Follow video · " + esc(s.tv_style.name) : s.tv_style.category === "audio" ? "Music (shown as Standard)" : "Fixed color (shown as warm white)"}</b></div>` : ""}
         <div class="kv"><span>TV reads</span><b>${st.tv_reads_per_s ? `${st.tv_reads_per_s}/s · ${st.tv_read_median_ms} ms` : "—"}</b></div>
-      </div>`;
+      </div>
+      <label class="toggle"><input type="checkbox" id="autoresume" ${s.auto_resume ? "checked" : ""}> Auto resume</label>
+      <small class="toggle-hint">Restarts the stream when the TV turns back on after standby.</small>`;
     el.querySelector("#run").onclick = () => this._toggleRun();
+    el.querySelector("#autoresume").onchange = (e) => this._setAutoResume(e.target.checked);
   }
 
   _renderNetTest() {
@@ -384,6 +391,8 @@ const CSS = `
   .status { display:flex; flex-wrap:wrap; gap:24px; align-items:center; }
   .kv { display:flex; flex-direction:column; } .kv span { font-size:12px; color: var(--secondary-text-color); }
   .err { color: var(--error-color); }
+  .toggle { display:flex; gap:8px; align-items:center; margin-top:16px; cursor:pointer; }
+  .toggle-hint { display:block; margin-top:4px; font-size:12px; color: var(--secondary-text-color); }
   button { font: inherit; border:none; border-radius:8px; padding:8px 14px; cursor:pointer; background: var(--primary-color); color: var(--text-primary-color, #fff); }
   button.ghost { background: transparent; color: var(--primary-color); border:1px solid var(--divider-color); }
   button.danger { background: var(--error-color); }
