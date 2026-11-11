@@ -112,18 +112,56 @@ def test_standby_ends_the_stream_cleanly(make_streamer):
     assert not s.running
 
 
+class _LateStopEvent(threading.Event):
+    """A stop event the stream does not see: stop() has written its reason, the event is still unset."""
+
+    def __init__(self):
+        super().__init__()
+        self.requested = 0
+
+    def set(self):
+        self.requested += 1
+
+
 def test_stop_during_standby_counts_as_user(make_streamer):
+    """stop() during standby wins even if the stream reaches the standby limit before it sees the stop."""
     reader = _FakeReader(uniform_layer(SIZES, (0, 0, 0)), state="standby")
     s = make_streamer(reader)
+    s._stop = _LateStopEvent()
     s.running = True
     t = threading.Thread(target=s._run, daemon=True)
     t.start()
     time.sleep(GIVEUP_S / 3)  # in standby, but not long enough to give up
     s.stop()
-    t.join(5)
+    assert s._stop.requested == 1 and not s._stop.is_set()
+    t.join(GIVEUP_S * 10)  # the stream ends by itself at the standby limit
     assert not t.is_alive()
-    assert s.stop_reason == "user"
-    assert s.error is None and not s.running
+    assert s.error == "TV in standby"  # the standby branch did run ...
+    assert s.stop_reason == "user"  # ... and kept the reason stop() had set
+    assert not s.running
+
+
+def test_start_resets_the_stop_reason(make_streamer):
+    s = make_streamer(_FakeReader(uniform_layer(SIZES, (90, 90, 90))))
+    s._run = lambda: None  # no stream thread work; only start()'s bookkeeping is under test
+    s.stop_reason = "tv_standby"
+    s.start()
+    assert s.stop_reason is None and s.running
+
+
+@pytest.mark.parametrize("exc", [RuntimeError("bridge refused"), ValueError("bad answer")])
+def test_other_failure_in_the_stream_is_an_error(make_streamer, exc):
+    reader = _FakeReader(uniform_layer(SIZES, (90, 90, 90)))
+    s = make_streamer(reader)
+
+    def broken():
+        raise exc
+
+    s._stream = broken
+    assert _run(s, 2)
+    assert s.error == str(exc)
+    assert s.stop_reason == "error"
+    assert not s.running
 
 
 def test_black_frames_keep_the_stream_running(make_streamer):

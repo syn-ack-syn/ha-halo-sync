@@ -384,7 +384,8 @@ class Streamer:
         self._on_change()
 
     def stop(self, wait: bool = False) -> None:
-        self.stop_reason = "user"  # before the stop event, so a stream ending meanwhile keeps this reason
+        with self._lock:  # before the stop event, so a stream ending meanwhile keeps this reason
+            self.stop_reason = "user"
         self._stop.set()
         thread = self._thread
         if wait and thread and thread is not threading.current_thread():
@@ -459,8 +460,9 @@ class Streamer:
         except Exception as exc:  # noqa: BLE001 - surface any failure on the switch
             _LOGGER.warning("Halo Sync stopped: %s", exc)
             self.error = str(exc)
-            if self.stop_reason is None:
-                self.stop_reason = "tv_off" if isinstance(exc, TvGone) else "error"
+            with self._lock:
+                if self.stop_reason is None:
+                    self.stop_reason = "tv_off" if isinstance(exc, TvGone) else "error"
         finally:
             self.reader.fast = False
             self._stop.set()
@@ -639,8 +641,9 @@ class Streamer:
                     if mono - standby_since > TV_GIVEUP_S:
                         _LOGGER.info("Halo Sync stopped: the TV is in standby")
                         self.error = "TV in standby"
-                        if self.stop_reason is None:
-                            self.stop_reason = "tv_standby"
+                        with self._lock:
+                            if self.stop_reason is None:
+                                self.stop_reason = "tv_standby"
                         return  # _run stops the entertainment area and restores the lights
                 else:
                     standby_since = None
