@@ -1,6 +1,6 @@
-"""Constants for Ambilight TV + Hue Sync."""
+"""Constants for Halo Sync."""
 
-DOMAIN = "ambilight_hue_stream"
+DOMAIN = "halo_sync"
 
 CONF_TV_HOST = "tv_host"
 CONF_TV_USER = "tv_user"
@@ -98,5 +98,5 @@ DEFAULT_ACTIVE = "game"
 SEND_HZ = 50
 TV_GIVEUP_S = 15
 ADB_PORT = 5555
-PANEL_URL = "ambilight-hue"
-STATIC_URL = "/ambilight_hue_stream_static"
+PANEL_URL = "halo-sync"
+STATIC_URL = "/halo_sync_static"

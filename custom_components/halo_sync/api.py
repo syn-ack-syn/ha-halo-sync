@@ -29,11 +29,11 @@ class ApiError(Exception):
 
 def _device(dev_id: str) -> dict:
     return {
-        "device_name": "Home Assistant Ambilight TV + Hue Sync",
+        "device_name": "Home Assistant Halo Sync",
         "device_os": "Linux",
-        "app_name": "ambilight_hue_stream",
+        "app_name": "halo_sync",
         "type": "native",
-        "app_id": "app.ambilight_hue_stream",
+        "app_id": "app.halo_sync",
         "id": dev_id,
     }
 
@@ -75,7 +75,7 @@ def hue_register(host: str) -> dict | None:
     """Create an app key with an entertainment client key. None = link button not pressed."""
     r = requests.post(
         f"https://{host}/api",
-        json={"devicetype": "ambilight_hue_stream#homeassistant", "generateclientkey": True},
+        json={"devicetype": "halo_sync#homeassistant", "generateclientkey": True},
         verify=False,
         timeout=10,
     ).json()

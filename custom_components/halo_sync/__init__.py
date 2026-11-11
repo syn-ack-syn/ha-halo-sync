@@ -1,4 +1,4 @@
-"""Ambilight TV + Hue Sync: Philips Ambilight colors -> Hue Entertainment area, low latency."""
+"""Halo Sync: Philips Ambilight colors -> Hue Entertainment area, low latency."""
 
 from __future__ import annotations
 
@@ -56,10 +56,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if PANEL_URL not in hass.data.get("frontend_panels", {}):
         await panel_custom.async_register_panel(
             hass,
-            webcomponent_name="ambilight-hue-panel",
+            webcomponent_name="halo-sync-panel",
             frontend_url_path=PANEL_URL,
-            module_url=f"{STATIC_URL}/panel.js?v=17",
-            sidebar_title="Ambilight TV + Hue Sync",
+            module_url=f"{STATIC_URL}/panel.js?v=18",
+            sidebar_title="Halo Sync",
             sidebar_icon="mdi:television-ambient-light",
             require_admin=False,
             config={"entry_id": entry.entry_id},

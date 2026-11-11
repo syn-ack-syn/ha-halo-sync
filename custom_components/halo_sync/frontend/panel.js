@@ -1,5 +1,5 @@
-// Ambilight TV + Hue Sync sidebar panel (vanilla web component, no build step).
-const D = "ambilight_hue_stream";
+// Halo Sync sidebar panel (vanilla web component, no build step).
+const D = "halo_sync";
 
 const TUNABLES = [
   { key: "brightness", label: "Max brightness", min: 5, max: 100, step: 1, unit: "%",
@@ -76,7 +76,7 @@ const DARK_CONTENT = [
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
-class AmbilightHuePanel extends HTMLElement {
+class HaloSyncPanel extends HTMLElement {
   constructor() {
     super();
     this.attachShadow({ mode: "open" });
@@ -111,7 +111,7 @@ class AmbilightHuePanel extends HTMLElement {
         this._renderPresets();
       }, { type: `${D}/subscribe`, entry_id: this._entryId });
     } catch (e) {
-      this.shadowRoot.innerHTML = `<p style="padding:24px">Ambilight TV + Hue Sync: ${esc(e.message || e)}</p>`;
+      this.shadowRoot.innerHTML = `<p style="padding:24px">Halo Sync: ${esc(e.message || e)}</p>`;
     }
   }
 
@@ -156,7 +156,7 @@ class AmbilightHuePanel extends HTMLElement {
   _render() {
     this.shadowRoot.innerHTML = `
       <style>${CSS}</style>
-      <div class="toolbar"><ha-menu-button></ha-menu-button><div class="title">Ambilight TV + Hue Sync</div></div>
+      <div class="toolbar"><ha-menu-button></ha-menu-button><div class="title">Halo Sync</div></div>
       <div class="wrap">
         <div class="card" id="status"></div>
         <div class="card" id="nettest"></div>
@@ -416,4 +416,4 @@ const CSS = `
   .extra label { font-size:12px; color: var(--secondary-text-color); display:flex; gap:4px; align-items:center; }
 `;
 
-customElements.define("ambilight-hue-panel", AmbilightHuePanel);
+customElements.define("halo-sync-panel", HaloSyncPanel);

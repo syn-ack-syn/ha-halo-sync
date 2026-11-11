@@ -152,7 +152,7 @@ class AmbiHueConfigFlow(ConfigFlow, domain=DOMAIN):
             self._data[CONF_ENT_ID] = user_input[CONF_ENT_ID]
             await self.async_set_unique_id(f"{self._data[CONF_TV_HOST]}_{user_input[CONF_ENT_ID]}")
             self._abort_if_unique_id_configured()
-            return self.async_create_entry(title=f"Ambilight TV + Hue Sync: {self._areas[user_input[CONF_ENT_ID]]}", data=self._data)
+            return self.async_create_entry(title=f"Halo Sync: {self._areas[user_input[CONF_ENT_ID]]}", data=self._data)
         self._areas = await self.hass.async_add_executor_job(
             api.hue_entertainment_areas, self._data[CONF_HUE_HOST], self._data[CONF_HUE_USER]
         )

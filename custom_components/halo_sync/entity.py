@@ -20,7 +20,7 @@ class AmbiHueEntity(Entity):
         self._attr_translation_key = key
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, entry.entry_id)},
-            name="Ambilight TV + Hue Sync",
+            name="Halo Sync",
             manufacturer="Home Assistant",
             model="Ambilight to Hue Entertainment",
         )

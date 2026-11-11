@@ -246,7 +246,7 @@ class Streamer:
                 return
             self._stop.clear()
             self.running, self.error, self.stats = True, None, {}
-            self._thread = threading.Thread(target=self._run, name="ambilight_hue_stream", daemon=True)
+            self._thread = threading.Thread(target=self._run, name="halo_sync", daemon=True)
             self._thread.start()
         self._on_change()
 
@@ -318,7 +318,7 @@ class Streamer:
         try:
             self._stream()
         except Exception as exc:  # noqa: BLE001 - surface any failure on the switch
-            _LOGGER.warning("Ambilight TV + Hue Sync stopped: %s", exc)
+            _LOGGER.warning("Halo Sync stopped: %s", exc)
             self.error = str(exc)
         finally:
             self._stop.set()  # also ends the TV reader thread after a failure
@@ -369,14 +369,14 @@ class Streamer:
                 latest["t"] = time.time()
                 time.sleep(0.03)
 
-        threading.Thread(target=reader, name="ambilight_hue_stream_tv", daemon=True).start()
+        threading.Thread(target=reader, name="halo_sync_tv", daemon=True).start()
 
         r = requests.put(self._cfg_url, json={"action": "start"}, headers=self._hue_headers, verify=False, timeout=5)
         if r.status_code != 200:
             raise RuntimeError(f"bridge refused to start the entertainment area: {r.status_code} {r.text}")
         client = DTLSClient(cfg["hue_host"], 2100, cfg["hue_appid"], bytes.fromhex(cfg["hue_clientkey"]))
         client.connect()
-        _LOGGER.info("Ambilight TV + Hue Sync started (%d channels)", len(chans))
+        _LOGGER.info("Halo Sync started (%d channels)", len(chans))
 
         ent_id = cfg["entertainment_id"].encode()
         hue_s, extra_s = _Smoother(len(chans)), _Smoother(0)
