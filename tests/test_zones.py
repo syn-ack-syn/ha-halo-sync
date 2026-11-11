@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from conftest import uniform_layer
+from helpers import uniform_layer
 from halo_sync import zones
 from halo_sync.zones import NATIVE_SIZES, SIDES, ZoneSampler, ring_colors, ring_sizes, weights
 

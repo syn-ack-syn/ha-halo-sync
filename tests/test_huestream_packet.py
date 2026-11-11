@@ -12,7 +12,7 @@ import threading
 
 import pytest
 
-from conftest import uniform_layer
+from helpers import uniform_layer
 from halo_sync import streamer as streamer_mod
 
 ENT_ID = "0a1b2c3d-0000-4000-8000-000000000001"  # synthetic, 36 characters like a Hue v2 resource id
@@ -84,13 +84,24 @@ def packets(monkeypatch, sizes_3side):
 
     s = streamer_mod.Streamer(cfg, settings, on_change=lambda: None)
     _FakeDTLS.stop = s._stop
-    worker = threading.Thread(target=s._stream, daemon=True)
+    _FakeDTLS.instance = None  # never reuse the client (and packets) of a previous test
+    errors: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            s._stream()
+        except BaseException as exc:  # noqa: BLE001 - reported by the assert below
+            errors.append(exc)
+
+    worker = threading.Thread(target=run, daemon=True)
     worker.start()
     worker.join(timeout=5)
     s._stop.set()
     assert not worker.is_alive(), "stream loop did not stop"
+    assert not errors, f"stream loop failed: {errors!r}"
+    assert _FakeDTLS.instance is not None, "no DTLS client was created"
     sent = _FakeDTLS.instance.sent
-    assert sent, "no packet was sent"
+    assert len(sent) >= 3, f"expected at least 3 packets, got {len(sent)}"
     return sent
 
 
@@ -114,9 +125,12 @@ def test_sequence_number_increments(packets):
 
 def test_entertainment_id_is_36_ascii_chars(packets):
     p = packets[0]
+    ent_start = p.index(ENT_ID.encode("ascii"))
+    assert ent_start == HEADER_LEN
     ent = p[HEADER_LEN:HEADER_LEN + 36]
-    assert len(ENT_ID) == 36
+    assert len(ent) == 36
     assert ent.decode("ascii") == ENT_ID
+    assert len(p) - HEADER_LEN - len(ent) == 7 * len(CHANNELS)
 
 
 def test_seven_bytes_per_channel(packets):
@@ -125,11 +139,16 @@ def test_seven_bytes_per_channel(packets):
         assert len(body) == 7 * len(CHANNELS)
 
 
+# A uniform edge of (255, 128, 0) with gain 1, curve 1, brightness 100 and min brightness 0 is
+# passed through unchanged (a linear tone curve keeps colours above the noise level as they are),
+# and HueStream RGB channels are 16 bit, so 8-bit values scale by 65535 / 255 = 257.
+EXPECTED_16BIT = (255 * 257, 128 * 257, 0)
+
+
 def test_channel_ids_and_16bit_colors(packets):
     body = packets[-1][HEADER_LEN + 36:]
     for j, ch in enumerate(CHANNELS):
         cid, r, g, b = struct.unpack(">BHHH", body[7 * j:7 * j + 7])
         assert cid == ch["channel_id"]
-        assert all(0 <= v <= 65535 for v in (r, g, b))
-        # uniform orange edge (255, 128, 0) with a linear tone curve: red is the brightest channel
-        assert r > g > b
+        for got, want in zip((r, g, b), EXPECTED_16BIT):
+            assert abs(got - want) <= 1
