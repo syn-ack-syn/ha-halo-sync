@@ -1,4 +1,4 @@
-"""Stream on/off and auto-resume switches."""
+"""Stream on/off, auto-resume and lights-off-with-TV switches."""
 
 from __future__ import annotations
 
@@ -8,7 +8,13 @@ from .entity import AmbiHueEntity
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
-    async_add_entities([StreamSwitch(entry, "stream"), AutoResumeSwitch(entry, "auto_resume")])
+    async_add_entities(
+        [
+            StreamSwitch(entry, "stream"),
+            AutoResumeSwitch(entry, "auto_resume"),
+            LightsOffWithTvSwitch(entry, "lights_off_with_tv"),
+        ]
+    )
 
 
 class StreamSwitch(AmbiHueEntity, SwitchEntity):
@@ -47,3 +53,17 @@ class AutoResumeSwitch(AmbiHueEntity, SwitchEntity):
 
     async def async_turn_off(self, **kwargs) -> None:
         await self._mgr.async_set_auto_resume(False)
+
+
+class LightsOffWithTvSwitch(AmbiHueEntity, SwitchEntity):
+    _attr_icon = "mdi:lightbulb-off-outline"
+
+    @property
+    def is_on(self) -> bool:
+        return self._mgr.lights_off_with_tv
+
+    async def async_turn_on(self, **kwargs) -> None:
+        await self._mgr.async_set_lights_off_with_tv(True)
+
+    async def async_turn_off(self, **kwargs) -> None:
+        await self._mgr.async_set_lights_off_with_tv(False)

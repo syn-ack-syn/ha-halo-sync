@@ -56,6 +56,9 @@
       },
       "auto_resume": {
         "name": "Auto resume"
+      },
+      "lights_off_with_tv": {
+        "name": "Lights off when TV turns off"
       }
     },
     "select": {

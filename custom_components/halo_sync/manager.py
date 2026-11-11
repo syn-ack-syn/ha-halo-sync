@@ -43,7 +43,7 @@ from .const import (
 _ADDED_IN = {"tv_style": 2, "native": 3}
 from . import nettest
 from .resume import AutoResume
-from .streamer import Streamer
+from .streamer import Streamer, ends_with_lights_off
 from .tv_reader import TvReader
 
 _LOGGER = logging.getLogger(__name__)
@@ -131,6 +131,7 @@ class Manager:
         self.hue_channels: list[dict] = []
         self._extra_task: asyncio.Task | None = None
         self._snapshot = False
+        self._extra_ids: list[str] = []  # entities in the current scene snapshot
         # A restore and the next snapshot must not interleave: starting right after a preset change
         # would let the pending restore use up the new snapshot, leaving nothing to restore on stop.
         self._extra_lock = asyncio.Lock()
@@ -139,6 +140,8 @@ class Manager:
         self.tv_color: tuple[int, int, int] | None = None
         self._nettest_lock = asyncio.Lock()
         self.resume = AutoResume()
+        # Turn the lights off instead of restoring them when the stream ends because the TV went off.
+        self.lights_off_with_tv = False
         # Set by _async_persist_resume (unload or HA stop): the stream ending now is no manual stop.
         self._unloading = False
 
@@ -152,6 +155,8 @@ class Manager:
                 presets[pid] = copy.deepcopy(DEFAULT_PRESETS[pid])
         self.presets = {pid: _clean_preset(p, pid) for pid, p in presets.items()}
         self.resume = AutoResume(enabled=data.get("auto_resume", True), pending=data.get("resume_pending", False))
+        self.lights_off_with_tv = bool(data.get("lights_off_with_tv", False))
+        self.streamer.lights_off_with_tv = self.lights_off_with_tv
         if seen < DEFAULTS_VERSION or any("dark_mode" in p for p in presets.values()):
             self._save()  # persists newly added defaults and the dark_mode -> dark_content migration
         for candidate in (data.get("active"), DEFAULT_ACTIVE, next(iter(self.presets))):
@@ -167,6 +172,7 @@ class Manager:
             "defaults_version": DEFAULTS_VERSION,
             "auto_resume": self.resume.enabled,
             "resume_pending": self.resume.pending,
+            "lights_off_with_tv": self.lights_off_with_tv,
         }
 
     def _save(self) -> None:
@@ -252,6 +258,7 @@ class Manager:
             "hue_channels": self.hue_channels,
             "auto_resume": self.resume.enabled,
             "resume_pending": self.resume.pending,
+            "lights_off_with_tv": self.lights_off_with_tv,
         }
 
     # ---- presets -------------------------------------------------------
@@ -342,6 +349,14 @@ class Manager:
 
     async def async_set_auto_resume(self, enabled: bool) -> None:
         if self.resume.set_enabled(enabled):
+            self._save()
+        self.notify()
+
+    async def async_set_lights_off_with_tv(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if enabled != self.lights_off_with_tv:
+            self.lights_off_with_tv = enabled
+            self.streamer.lights_off_with_tv = enabled
             self._save()
         self.notify()
 
@@ -458,6 +473,7 @@ class Manager:
             await self.hass.services.async_call(
                 "scene", "create", {"scene_id": f"{DOMAIN}_restore", "snapshot_entities": entity_ids}, blocking=True
             )
+            self._extra_ids = entity_ids
             self._snapshot = True
         next_due = [0.0] * len(lights)
         sent: list[tuple | None] = [None] * len(lights)
@@ -499,6 +515,11 @@ class Manager:
     async def _restore_extra(self) -> None:
         if self._snapshot:
             self._snapshot = False
+            if ends_with_lights_off(self.streamer.stop_reason, self.lights_off_with_tv):
+                await self.hass.services.async_call(
+                    "light", "turn_off", {"entity_id": self._extra_ids, "transition": 0.8}, blocking=True
+                )
+                return
             await self.hass.services.async_call(
                 "scene", "turn_on", {"entity_id": f"scene.{DOMAIN}_restore", "transition": 0.8}, blocking=True
             )
