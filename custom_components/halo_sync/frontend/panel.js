@@ -198,8 +198,9 @@ class HaloSyncPanel extends HTMLElement {
         <div class="kv"><span>TV reads</span><b>${st.tv_reads_per_s ? `${st.tv_reads_per_s}/s · ${st.tv_read_median_ms} ms` : "—"}</b></div>
       </div>
       <label class="toggle"><input type="checkbox" id="autoresume" ${s.auto_resume ? "checked" : ""} ${s.auto_resume === undefined ? "disabled" : ""}> Auto resume</label>
+      <small class="toggle-hint">Restarts the stream when the TV turns back on after standby.</small>
       <label class="toggle" title="Turn the lights off instead of restoring them when the TV turns off"><input type="checkbox" id="lightsoff" ${s.lights_off_with_tv ? "checked" : ""} ${s.lights_off_with_tv === undefined ? "disabled" : ""}> Lights off with TV</label>
-      <small class="toggle-hint">Restarts the stream when the TV turns back on after standby.</small>`;
+      <small class="toggle-hint">Turns the lights off instead of restoring them when the TV turns off.</small>`;
     el.querySelector("#run").onclick = () => this._toggleRun();
     el.querySelector("#autoresume").onchange = (e) => this._setAutoResume(e.target.checked);
     el.querySelector("#lightsoff").onchange = (e) => this._setLightsOff(e.target.checked);
