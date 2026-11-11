@@ -139,7 +139,7 @@ class Manager:
         self.tv_color: tuple[int, int, int] | None = None
         self._nettest_lock = asyncio.Lock()
         self.resume = AutoResume()
-        # Set by async_shutdown: unloading (also on every HA restart) is no manual stop.
+        # Set by _async_persist_resume (unload or HA stop): the stream ending now is no manual stop.
         self._unloading = False
 
     # ---- state ---------------------------------------------------------
@@ -208,6 +208,9 @@ class Manager:
             self.hass.async_create_task(self._async_resume())
 
     async def _async_resume(self) -> None:
+        # A manual stop or an unload between the decision and this task wins.
+        if not self.resume.pending or self._unloading:
+            return
         await self.hass.async_add_executor_job(self.streamer.start)
         # A start that failed before _on_streamer_change saw it running never reached stream_ended there.
         if (
