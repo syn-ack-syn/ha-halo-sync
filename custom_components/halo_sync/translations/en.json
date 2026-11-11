@@ -2,7 +2,7 @@
   "config": {
     "step": {
       "user": {
-        "title": "Ambilight TV + Hue Sync",
+        "title": "Halo Sync",
         "description": "Choose the Philips TV and the Hue bridge to use. Devices found on your network (switch the TV on first):\n\n**TVs**\n\n{tv_table}\n\n**Hue bridges**\n\n{bridge_table}\n\nPick one below, or type an address (a typed address overrides the selection). Android / Google TVs are supported; TitanOS TVs are untested. After you submit, a PIN appears on the TV.",
         "data": {
           "tv_choice": "TV",
@@ -72,7 +72,7 @@
   "services": {
     "activate_preset": {
       "name": "Activate preset",
-      "description": "Switch the Ambilight TV + Hue Sync preset (by name or id).",
+      "description": "Switch the Halo Sync preset (by name or id).",
       "fields": {
         "preset": {
           "name": "Preset",

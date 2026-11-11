@@ -39,7 +39,7 @@ def _reply(hass, connection, msg, mgr):
 async def ws_get(hass, connection, msg):
     mgr = _manager(hass, msg.get("entry_id"))
     if not mgr:
-        return connection.send_error(msg["id"], "not_found", "Ambilight TV + Hue Sync is not configured")
+        return connection.send_error(msg["id"], "not_found", "Halo Sync is not configured")
     if not mgr.hue_channels:
         await mgr.async_refresh_channels()
     _reply(hass, connection, msg, mgr)
@@ -54,7 +54,7 @@ def ws_subscribe(hass, connection, msg):
 
     mgr = _manager(hass, msg.get("entry_id"))
     if not mgr:
-        return connection.send_error(msg["id"], "not_found", "Ambilight TV + Hue Sync is not configured")
+        return connection.send_error(msg["id"], "not_found", "Halo Sync is not configured")
 
     @callback
     def forward() -> None:
@@ -142,7 +142,7 @@ async def ws_run(hass, connection, msg):
 async def ws_connection_test(hass, connection, msg):
     mgr = _manager(hass, msg.get("entry_id"))
     if not mgr:
-        return connection.send_error(msg["id"], "not_found", "Ambilight TV + Hue Sync is not configured")
+        return connection.send_error(msg["id"], "not_found", "Halo Sync is not configured")
     if mgr._nettest_lock.locked():
         return connection.send_error(msg["id"], "busy", "A connection test is already running")
     try:

@@ -76,7 +76,7 @@ const DARK_CONTENT = [
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
-class AmbilightHuePanel extends HTMLElement {
+class HaloSyncPanel extends HTMLElement {
   constructor() {
     super();
     this.attachShadow({ mode: "open" });
@@ -416,4 +416,4 @@ const CSS = `
   .extra label { font-size:12px; color: var(--secondary-text-color); display:flex; gap:4px; align-items:center; }
 `;
 
-customElements.define("halo-sync-panel", AmbilightHuePanel);
+customElements.define("halo-sync-panel", HaloSyncPanel);

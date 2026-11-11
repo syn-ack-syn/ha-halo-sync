@@ -151,7 +151,7 @@ data:
   preset: Game
 ```
 
-Switch the preset by name or id, then turn `switch.ambilight_tv_hue_sync_stream` on or off
+Switch the preset by name or id, then turn `switch.halo_sync_stream` on or off
 (the exact entity id depends on the name Home Assistant registered).
 
 ## How it compares
