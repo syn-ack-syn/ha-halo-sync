@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -18,7 +19,7 @@ from halo_sync.const import (
     TV_STANDBY_POLL_S,
     TV_STYLE_POLL_S,
 )
-from halo_sync.tv_reader import TvReader, is_black
+from halo_sync.tv_reader import TvReader
 
 SIZES = {"left": 4, "top": 8, "right": 4, "bottom": 0}  # the target TV, no bottom side
 COLOR = uniform_layer(SIZES, (120, 60, 30))
@@ -180,6 +181,36 @@ def test_stop_between_requests_and_close_after_the_thread():
     assert session.closed and closed_while_running == [False]
 
 
+def test_stop_returns_after_the_join_timeout_and_the_thread_closes_later(monkeypatch):
+    """A request hanging past the join timeout: stop() returns anyway, the thread closes the session."""
+    monkeypatch.setattr(tv_reader_mod, "TV_REQUEST_TIMEOUT_S", 0.05)  # join timeout 1.05 s
+    session = _FakeSession(_Clock())
+    in_request, release = threading.Event(), threading.Event()
+    orig = session._answer
+
+    def answer(url):
+        in_request.set()
+        release.wait(10)
+        return orig(url)
+
+    session._answer = answer
+    r = TvReader("tv.invalid", "u", "p", session_factory=lambda: session)
+    r.start()
+    try:
+        assert in_request.wait(5)
+        t0 = time.monotonic()
+        r.stop()
+        waited = time.monotonic() - t0
+        assert 1.0 <= waited < 3.0
+        assert r._thread.is_alive()
+        assert not session.closed  # closing now would pull the session from under the request
+    finally:
+        release.set()
+    r._thread.join(5)
+    assert not r._thread.is_alive()
+    assert session.closed
+
+
 def test_polls_the_configured_endpoint(clock, session):
     r = TvReader("tv.invalid", "u", "p", endpoint="processed", session_factory=lambda: session, clock=clock)
     r._step()
@@ -211,8 +242,9 @@ def test_wake_resets_backoff(clock, session):
     for _ in range(6):
         r._step()
     assert r._backoff == TV_BACKOFF_MAX_S
+    assert r._step() == TV_BACKOFF_MAX_S
     r.wake()
-    assert r._backoff == 0.5
+    assert r._step() == 0.5  # the next failure starts the backoff from the beginning
 
 
 def test_wake_ends_the_wait():
@@ -332,12 +364,9 @@ def test_black_frames_are_not_standby(reader, session, clock, changes):
     while clock.t < start + 20:
         delay = _wait_and_step(reader, clock, delay)
     assert reader.state == "ok"
-    assert reader.black
     assert delay == pytest.approx(0.1)  # still the full rate
     assert reader.read_count >= 190
-    session.layer = COLOR
-    reader._step()
-    assert not reader.black
+    assert reader.latest_measured == BLACK
     assert changes == ["ok"]
 
 
@@ -347,7 +376,8 @@ def test_leaving_standby_with_a_black_picture(reader, session, clock):
     assert reader.state == "standby"
     session.power, session.layer = "On", BLACK
     assert _wait_and_step(reader, clock, TV_STANDBY_POLL_S) == 0.0
-    assert reader.state == "ok" and reader.black
+    assert reader.state == "ok"
+    assert reader.latest_measured == BLACK
 
 
 def test_unreachable_while_in_standby(reader, session, clock):
@@ -422,15 +452,6 @@ def test_style_error_keeps_state_and_old_value(reader, session, clock, changes):
 
 
 # ---- helpers and boundaries ------------------------------------------------
-def test_is_black():
-    assert is_black(BLACK)
-    assert is_black({})
-    assert not is_black(COLOR)
-    almost = uniform_layer(SIZES, (0, 0, 0))
-    almost["top"]["3"] = {"r": 0, "g": 1, "b": 0}
-    assert not is_black(almost)
-
-
 def test_reader_does_not_import_home_assistant():
     source = Path(tv_reader_mod.__file__).read_text()
     assert "homeassistant" not in source

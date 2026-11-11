@@ -314,12 +314,14 @@ class Streamer:
                 _LOGGER.warning("Could not restore Hue light %s: %s", rid, exc)
 
     def _run(self) -> None:
-        # The reader polls at full rate only while a stream needs it; wake it from a slow wait or backoff.
+        snap: dict[str, dict] = {}
+        # The reader polls at full rate only while a stream needs it; wake it from a slow wait or
+        # backoff. The finally below hands the rate back whatever fails, the snapshot included.
         self.reader.fast = True
         self.reader.wake()
-        with _RESTORE_LOCK:
-            snap = self._snapshot_lights()
         try:
+            with _RESTORE_LOCK:
+                snap = self._snapshot_lights()
             self._stream()
         except Exception as exc:  # noqa: BLE001 - surface any failure on the switch
             _LOGGER.warning("Halo Sync stopped: %s", exc)

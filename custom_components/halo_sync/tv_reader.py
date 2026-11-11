@@ -48,15 +48,6 @@ class _Stopped(Exception):
     """Raised between two requests of a cycle once stop() was called."""
 
 
-def is_black(layer: dict) -> bool:
-    """True when every pixel of a JointSpace layer is (0, 0, 0), or the layer has no pixels."""
-    return all(
-        not (px.get("r") or px.get("g") or px.get("b"))
-        for side in layer.values()
-        for px in side.values()
-    )
-
-
 class TvReader:
     """Polls the Ambilight colors (and, on demand, the TV's Ambilight settings) over one session."""
 
@@ -89,7 +80,6 @@ class TvReader:
         self._state: State = "unreachable"  # nothing read yet
         self._latest: dict | None = None
         self._latest_at: float | None = None
-        self._black = False
         self._menu: dict | None = None
         self._style_wanted = False
         self._backoff = TV_BACKOFF_MIN_S
@@ -114,11 +104,6 @@ class TvReader:
     @property
     def state(self) -> State:
         return self._state
-
-    @property
-    def black(self) -> bool:
-        """The last frame was completely black. A dark scene, not standby: polling goes on at full rate."""
-        return self._black
 
     @property
     def style_wanted(self) -> bool:
@@ -154,14 +139,20 @@ class TvReader:
         self._thread.start()
 
     def stop(self, wait: bool = True) -> None:
-        """Stop polling. With `wait`, no request is running any more when this returns."""
+        """Stop polling.
+
+        With `wait`, this waits up to TV_REQUEST_TIMEOUT_S + 1 s for the thread. No further request
+        starts after stop(); a request still running when the wait ends finishes in the background,
+        and the thread closes the session once it is done (see _run).
+        """
         self._stop.set()
         self._wake.set()
         thread = self._thread
         if thread and thread.is_alive():
             if wait and thread is not threading.current_thread():
                 thread.join(timeout=TV_REQUEST_TIMEOUT_S + 1)
-            # Otherwise the thread closes the session itself when it ends (see _run).
+                if thread.is_alive():
+                    _LOGGER.debug("TV reader still finishing a request; it closes the session when done")
         else:
             self._session.close()
 
@@ -202,14 +193,14 @@ class TvReader:
                     self._set_state("standby")
                     return TV_STANDBY_POLL_S
                 self._check_stop()
-            layer = self._read_colors()
+            self._read_colors()
             self._check_stop()
             self._poll_style(t0)
         except (requests.RequestException, ValueError, KeyError, TypeError, AttributeError) as exc:
             _LOGGER.debug("TV read failed: %s", exc)
             return self._fail()
         self._backoff = TV_BACKOFF_MIN_S
-        self._black = is_black(layer)
+        # A completely black frame is a dark scene, not standby: polling goes on at the same rate.
         self._set_state("ok")
         period = self._fast_period if self.fast else self._idle_period
         return max(0.0, period - (self._clock() - t0))
@@ -220,7 +211,7 @@ class TvReader:
         if self._power_off():
             return TV_STANDBY_POLL_S
         self._check_stop()
-        self._black = is_black(self._read_colors())
+        self._read_colors()
         self._power_due = t0 + TV_POWER_POLL_S
         self._set_state("ok")
         return 0.0

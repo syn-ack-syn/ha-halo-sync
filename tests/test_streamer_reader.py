@@ -127,6 +127,21 @@ def test_silent_tv_ends_the_stream_with_an_error(make_streamer):
     assert s.error == "TV stopped answering"
 
 
+def test_snapshot_failure_hands_the_rate_back(make_streamer):
+    reader = _FakeReader(uniform_layer(SIZES, (90, 90, 90)))
+    s = make_streamer(reader)
+
+    def broken():
+        raise TypeError("unexpected bridge answer")
+
+    s._snapshot_lights = broken
+    assert _run(s, 2)
+    assert reader.fast is False
+    assert reader.woken == 1
+    assert s.error == "unexpected bridge answer"
+    assert not s.running
+
+
 def test_stream_sets_fast_and_wakes_the_reader(make_streamer):
     reader = _FakeReader(uniform_layer(SIZES, (90, 90, 90)))
     s = make_streamer(reader)
