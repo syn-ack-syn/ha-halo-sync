@@ -1,0 +1,144 @@
+{
+  "captured": "2026-11-11",
+  "fixture_samples": {
+    "measured": {
+      "errors": 0,
+      "requests": 20,
+      "response_ms": {
+        "max": 31.2,
+        "median": 26.2,
+        "min": 24.6,
+        "p95": 30.3
+      }
+    },
+    "processed": {
+      "errors": 0,
+      "requests": 20,
+      "response_ms": {
+        "max": 34.5,
+        "median": 27.2,
+        "min": 21.6,
+        "p95": 31.5
+      }
+    }
+  },
+  "note": "fixture_samples: 20 requests 100 ms apart. video: sequential runs per endpoint; during this capture the picture was static (Apple TV home screen), so changes_per_second is 0. A separate run with a moving picture on 2026-11-11 gave measured 8.5 and processed 9.4 changes/s at 10 Hz, median response 26 ms.",
+  "video": {
+    "measured": {
+      "answers_per_second": [
+        9,
+        10,
+        9,
+        10,
+        9,
+        9,
+        9,
+        9,
+        9,
+        10,
+        9,
+        10,
+        9,
+        9,
+        10,
+        9,
+        10,
+        9,
+        9,
+        10
+      ],
+      "changes_per_second": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "changes_per_second_mean": 0.0,
+      "distinct_responses": 1,
+      "duration_s": 20.0,
+      "errors": 0,
+      "requests": 187,
+      "response_ms": {
+        "max": 241.0,
+        "median": 25.9,
+        "min": 21.2,
+        "p95": 32.2
+      },
+      "target_hz": 10.0
+    },
+    "processed": {
+      "answers_per_second": [
+        9,
+        10,
+        9,
+        9,
+        9,
+        10,
+        9,
+        10,
+        9,
+        9,
+        10,
+        9,
+        10,
+        9,
+        10,
+        9,
+        10,
+        9,
+        9,
+        10
+      ],
+      "changes_per_second": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "changes_per_second_mean": 0.0,
+      "distinct_responses": 1,
+      "duration_s": 20.0,
+      "errors": 0,
+      "requests": 188,
+      "response_ms": {
+        "max": 42.0,
+        "median": 25.3,
+        "min": 21.4,
+        "p95": 30.4
+      },
+      "target_hz": 10.0
+    }
+  }
+}
