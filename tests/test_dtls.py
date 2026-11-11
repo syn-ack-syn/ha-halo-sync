@@ -221,7 +221,9 @@ class FakeBridge:
     `junk_epoch1` sends an undecryptable epoch 1 record between CCS and Finished, `hello_version` /
     `fin_version` / `hvr_version` change the record version of the server flight / the Finished record / the HelloVerifyRequest,
     `close_notify_after` sends an encrypted close_notify after that many application records,
-    `junk_after_app` answers application data with an undecryptable record. The HelloVerifyRequest
+    `junk_after_app` answers application data with an undecryptable record, `junk_datagram`
+    sends a cut datagram before the first answer, `late_hvr` sends a HelloVerifyRequest (fe ff)
+    just before CCS + Finished. The HelloVerifyRequest
     goes out with the DTLS 1.0 record version, as RFC 6347 allows. A ClientHello from a new port
     starts a new session (the stream reconnects with a new socket).
     """
@@ -365,6 +367,8 @@ class FakeBridge:
                 self.final = fin_rec + ccs
             else:
                 self.final = ccs + junk + fin_rec
+            if o.get("late_hvr"):  # a reply to a retransmitted first ClientHello, arriving late
+                self._send(self._plain(22, _hs(3, b"\xfe\xff" + bytes([len(self.cookie)]) + self.cookie, 0), b"\xfe\xff"))
             self._send(self.final)
         elif epoch == 1 and ctype == 23:
             self.app.append(self._open(ctype, seqnum, frag))
@@ -388,6 +392,8 @@ class FakeBridge:
         if o.get("truncate"):
             self._send(_rec(22, b"\x02" * 30)[:20])
             return
+        if o.get("junk_datagram") and len(self.hellos) == 1:
+            self._send(b"\x16\xfe\xfd\x00")  # cut record header, then the real answer
         body = msg[12:]
         self.client_random = body[2:34]
         sid_len = body[34]
@@ -473,6 +479,7 @@ def test_wrong_psk_against_strict_bridge_fails(bridge):
     with pytest.raises(DTLSAlert) as err:
         _connect(b, psk=b"\xff" * 16)
     assert err.value.description == 20  # bad_record_mac
+    assert err.value.authenticated is False  # plain epoch 0 alert
     assert b.finished_ok is False
 
 
@@ -480,10 +487,10 @@ def test_bridge_without_the_key_is_rejected(bridge):
     """A bridge that answers without knowing the PSK cannot produce a valid server Finished.
 
     Its Finished does not decrypt, so it is dropped like any invalid record and the handshake
-    never completes.
+    never completes; the timeout then names the likely cause.
     """
     b = bridge(psk=b"\xee" * 16, lenient=True)
-    with pytest.raises(DTLSError, match="timeout"):
+    with pytest.raises(DTLSError, match="client key"):
         _connect(b)
 
 
@@ -510,15 +517,20 @@ def test_lost_change_cipher_spec_is_recovered_by_retransmission(bridge):
     assert b.finals >= 1  # only the repeated final flight got CCS + Finished
 
 
-def test_server_flight_with_wrong_record_version_is_rejected(bridge):
+def test_server_flight_with_dtls10_record_version_is_rejected(bridge):
     b = bridge(hello_version=b"\xfe\xff")  # only a HelloVerifyRequest may carry DTLS 1.0
-    with pytest.raises(DTLSError, match="record version"):
+    with pytest.raises(DTLSError, match="record version fe ff|record version feff"):
         _connect(b)
 
 
+def test_server_flight_with_unknown_record_version_is_dropped(bridge):
+    with pytest.raises(DTLSError, match="timeout"):
+        _connect(bridge(hello_version=b"\x03\x03"))
+
+
 @pytest.mark.parametrize("version", [b"\x03\x03", b"\xfe\xfc"])
-def test_hello_verify_with_unknown_record_version_is_rejected(bridge, version):
-    with pytest.raises(DTLSError, match="record version"):
+def test_hello_verify_with_unknown_record_version_is_dropped(bridge, version):
+    with pytest.raises(DTLSError, match="timeout"):
         _connect(bridge(hvr_version=version))
 
 
@@ -545,6 +557,7 @@ def test_close_notify_from_the_bridge_is_raised_on_the_next_send(bridge):
         with pytest.raises(DTLSAlert) as err:
             c.send(b"two")
         assert (err.value.level, err.value.description) == (1, 0)  # warning close_notify
+        assert err.value.authenticated is True  # it decrypted with the session keys
     finally:
         c.close()
 
@@ -568,10 +581,18 @@ def test_fragmented_server_hello_is_rejected(bridge):
         _connect(b)
 
 
-def test_truncated_record_from_bridge_is_a_dtls_error(bridge):
-    b = bridge(truncate=True)
-    with pytest.raises(DTLSError, match="record"):
+def test_truncated_record_from_bridge_is_dropped(bridge):
+    b = bridge(truncate=True)  # every answer is a cut record
+    with pytest.raises(DTLSError, match="timeout"):
         _connect(b)
+
+
+def test_single_broken_datagram_does_not_break_the_handshake(bridge):
+    _connect(bridge(junk_datagram=True)).close()
+
+
+def test_late_hello_verify_during_the_final_flight_is_dropped(bridge):
+    _connect(bridge(late_hvr=True)).close()
 
 
 def test_plain_alert_is_reported_with_code(bridge):
@@ -579,6 +600,7 @@ def test_plain_alert_is_reported_with_code(bridge):
     with pytest.raises(DTLSAlert) as err:
         _connect(b)
     assert (err.value.level, err.value.description) == (2, 40)
+    assert err.value.authenticated is False
 
 
 def test_encrypted_alert_is_reported_with_code(bridge):
@@ -586,6 +608,7 @@ def test_encrypted_alert_is_reported_with_code(bridge):
     with pytest.raises(DTLSAlert) as err:
         _connect(b)
     assert err.value.description == 80  # internal_error
+    assert err.value.authenticated is True
 
 
 def test_lost_hello_is_retransmitted(bridge):
@@ -612,3 +635,30 @@ def test_overall_timeout_caps_the_handshake(bridge):
     with pytest.raises(DTLSError, match="timeout"):
         _connect(b, timeout=0.15)
     assert time.monotonic() - start < 0.6
+
+
+class _FloodSocket:
+    """A socket that always has another datagram waiting."""
+
+    def __init__(self):
+        self.reads, self.sent = 0, []
+
+    def recv(self, size, flags=0):
+        self.reads += 1
+        return _rec(23, b"\x00" * 30, 1, self.reads)
+
+    def send(self, data):
+        self.sent.append(data)
+
+    def close(self):
+        pass
+
+
+def test_drain_reads_at_most_16_datagrams_per_send():
+    c = DTLSClient("127.0.0.1", 9, "id", PSK)
+    c.sock.close()
+    c.sock = flood = _FloodSocket()
+    c.epoch, c.write, c.read, c.connected = 1, (bytes(16), bytes(4)), (bytes(16), bytes(4)), True
+    c.send(b"frame")
+    assert flood.reads == dtls.DRAIN_MAX == 16
+    assert len(flood.sent) == 1

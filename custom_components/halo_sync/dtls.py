@@ -39,6 +39,7 @@ VERIFY_DATA_LEN = 12
 RETRANSMIT_S = 0.5  # first wait for an answer; doubles with every retransmission of the flight
 FLIGHT_ATTEMPTS = 3  # transmissions of one flight before the handshake gives up
 RECV_SIZE = 4096
+DRAIN_MAX = 16  # datagrams read per send() at most, so a flood cannot stall the stream
 EARLY_RECORDS = 4  # epoch 1 records kept while the server's ChangeCipherSpec is still missing
 
 ALERT_NAMES = {
@@ -52,11 +53,19 @@ class DTLSError(Exception):
     pass
 
 
-class DTLSAlert(DTLSError):
-    """The bridge sent an alert; `level` 1 = warning, 2 = fatal, `description` is the RFC 5246 code."""
+class DTLSTimeout(DTLSError):
+    """The bridge did not answer a flight in time."""
 
-    def __init__(self, level: int, description: int):
-        self.level, self.description = level, description
+
+class DTLSAlert(DTLSError):
+    """The bridge sent an alert; `level` 1 = warning, 2 = fatal, `description` is the RFC 5246 code.
+
+    `authenticated` is True for an alert that arrived encrypted in epoch 1 (it decrypted with the
+    session keys, so it really comes from the bridge); epoch 0 alerts are plain and unauthenticated.
+    """
+
+    def __init__(self, level: int, description: int, authenticated: bool = False):
+        self.level, self.description, self.authenticated = level, description, authenticated
         kind = {1: "warning", 2: "fatal"}.get(level, f"level {level}")
         name = ALERT_NAMES.get(description, "unknown")
         super().__init__(f"alert from bridge: {kind} {name} ({description})")
@@ -133,10 +142,10 @@ def _parse_handshakes(payload: bytes) -> list[tuple[int, int, bytes, bytes]]:
     return out
 
 
-def _parse_alert(fragment: bytes) -> DTLSAlert:
+def _parse_alert(fragment: bytes, authenticated: bool = False) -> DTLSAlert:
     if len(fragment) != 2:
         raise DTLSError("malformed alert from bridge")
-    return DTLSAlert(fragment[0], fragment[1])
+    return DTLSAlert(fragment[0], fragment[1], authenticated)
 
 
 def _parse_hello_verify(body: bytes) -> bytes:
@@ -229,13 +238,17 @@ class DTLSClient:
                     data = self.sock.recv(RECV_SIZE)
                 except TimeoutError:
                     break
-                for rec in _parse_records(data):
+                try:
+                    records = _parse_records(data)
+                except DTLSError:
+                    continue  # one broken datagram is dropped, not the handshake
+                for rec in records:
                     if on_record(*rec):
                         return
             if time.monotonic() >= deadline:
                 break
             wait *= 2
-        raise DTLSError("handshake timeout: no answer from the bridge")
+        raise DTLSTimeout("handshake timeout: no answer from the bridge")
 
     # ---- handshake -----------------------------------------------------
     def connect(self) -> None:
@@ -258,17 +271,17 @@ class DTLSClient:
         ch = self._handshake(HT_CLIENT_HELLO, client_hello(b""))
 
         def on_hello(ctype: int, version: bytes, epoch: int, seqnum: bytes, frag: bytes) -> bool:
-            if epoch != 0:
+            # Records of an unknown version are dropped. DTLS 1.0 (fe ff) is only allowed around a
+            # HelloVerifyRequest; a server flight message in such a record is a protocol violation.
+            if epoch != 0 or version not in (VERSION, VERSION_10):
                 return False
-            if version not in (VERSION, VERSION_10):
-                raise DTLSError(f"unexpected record version {version.hex()}")
-            if ctype == CT_ALERT:
+            if ctype == CT_ALERT and version == VERSION:
                 raise _parse_alert(frag)
             if ctype != CT_HANDSHAKE:
                 return False
             msgs = _parse_handshakes(frag)
             if version != VERSION and any(m[0] != HT_HELLO_VERIFY for m in msgs):
-                raise DTLSError(f"unexpected record version {version.hex()}")
+                raise DTLSError(f"unexpected record version {version.hex()} on a server flight message")
             for htype, mseq, msg, body in msgs:
                 if htype == HT_HELLO_VERIFY:
                     # Only an answer to the cookie-less ClientHello counts. Later copies are replies
@@ -325,16 +338,17 @@ class DTLSClient:
         # Flight 6: the server's ChangeCipherSpec, then its Finished in epoch 1. Epoch 1 records that
         # arrive before the CCS (reordered or CCS lost) are kept, a few at most, and only looked at
         # once the CCS is there; without a CCS the handshake never completes (it times out).
-        ccs = {"seen": False}
+        ccs = {"seen": False, "undecryptable": 0}
         early: list[tuple[int, bytes, bytes]] = []
 
         def on_epoch1(ctype: int, seqnum: bytes, frag: bytes) -> bool:
             try:
                 plain = self._decrypt(server_key, server_iv, ctype, seqnum, frag)
             except DTLSError:
+                ccs["undecryptable"] += 1
                 return False  # RFC 6347 4.1.2.1: invalid records are dropped silently
             if ctype == CT_ALERT:
-                raise _parse_alert(plain)
+                raise _parse_alert(plain, authenticated=True)
             if ctype != CT_HANDSHAKE:
                 raise DTLSError(f"unexpected record type {ctype} before server Finished")
             msgs = _parse_handshakes(plain)
@@ -347,7 +361,7 @@ class DTLSClient:
         def on_final(ctype: int, version: bytes, epoch: int, seqnum: bytes, frag: bytes) -> bool:
             if epoch == 0:
                 if version != VERSION:
-                    raise DTLSError(f"unexpected record version {version.hex()}")
+                    return False  # e.g. a late HelloVerifyRequest (fe ff): dropped
                 if ctype == CT_ALERT:
                     raise _parse_alert(frag)
                 if ctype == CT_CCS and not ccs["seen"]:
@@ -365,7 +379,13 @@ class DTLSClient:
                 return False
             return on_epoch1(ctype, seqnum, frag)
 
-        self._exchange(send_final, on_final)
+        try:
+            self._exchange(send_final, on_final)
+        except DTLSTimeout:
+            if ccs["undecryptable"]:
+                # The bridge answered, but not with our keys: the PSK does not match.
+                raise DTLSError("bridge's Finished could not be decrypted (wrong client key?)") from None
+            raise
         self.sock.settimeout(None)
         self.read = (server_key, server_iv)
         self.connected = True
@@ -379,12 +399,12 @@ class DTLSClient:
     def _drain(self) -> None:
         """Read whatever the bridge sent since the last call, without blocking.
 
-        Hue sends nothing during a stream except alerts (close_notify when it ends the session, a
+        At most DRAIN_MAX datagrams per call. Hue sends nothing during a stream except alerts (close_notify when it ends the session, a
         fatal alert on errors); those raise DTLSAlert. Records that do not decrypt, carry another
         version or epoch, or do not parse are dropped silently (RFC 6347 4.1.2.1).
         """
         key, iv = self.read
-        while True:
+        for _ in range(DRAIN_MAX):
             try:
                 data = self.sock.recv(RECV_SIZE, socket.MSG_DONTWAIT)
             except (BlockingIOError, InterruptedError):
@@ -397,7 +417,7 @@ class DTLSClient:
                 if epoch != 1 or version != VERSION or ctype != CT_ALERT:
                     continue
                 try:
-                    alert = _parse_alert(self._decrypt(key, iv, ctype, seqnum, frag))
+                    alert = _parse_alert(self._decrypt(key, iv, ctype, seqnum, frag), authenticated=True)
                 except DTLSError:
                     continue
                 raise alert

@@ -153,7 +153,11 @@ def test_stream_sets_fast_and_wakes_the_reader(make_streamer):
 
 # ---- reconnect after a broken DTLS session ---------------------------------
 class _ScriptedDTLS:
-    """Each new client takes the next entry of `script`: "ok", "fail_connect", "fatal_connect" or ("break_after", n)."""
+    """Each new client takes the next entry of `script`.
+
+    "ok", "fail_connect" (timeout), ("break_after", n) (send fails after n packets) or ("alert",
+    description, authenticated) (connect raises that fatal alert).
+    """
 
     script: list = []
     clients: list = []
@@ -162,18 +166,20 @@ class _ScriptedDTLS:
         self.args = a
         self.mode = _ScriptedDTLS.script.pop(0) if _ScriptedDTLS.script else "ok"
         self.sent, self.closed = 0, False
+        self.sent_at: list[float] = []
         _ScriptedDTLS.clients.append(self)
 
     def connect(self):
         if self.mode == "fail_connect":
             raise streamer_mod.DTLSError("handshake timeout: no answer from the bridge")
-        if self.mode == "fatal_connect":
-            raise streamer_mod.DTLSAlert(2, 115)
+        if isinstance(self.mode, tuple) and self.mode[0] == "alert":
+            raise streamer_mod.DTLSAlert(2, self.mode[1], self.mode[2])
 
     def send(self, data):
-        if isinstance(self.mode, tuple) and self.sent >= self.mode[1]:
+        if isinstance(self.mode, tuple) and self.mode[0] == "break_after" and self.sent >= self.mode[1]:
             raise OSError("network is unreachable")
         self.sent += 1
+        self.sent_at.append(time.monotonic())
 
     def close(self):
         self.closed = True
@@ -250,14 +256,43 @@ def test_failed_first_connect_ends_the_stream(make_streamer, scripted):
     assert reader.fast is False
 
 
-def test_fatal_alert_on_reconnect_ends_the_stream(make_streamer, scripted):
-    actions = scripted([("break_after", 2), "fatal_connect"])
+@pytest.mark.parametrize("alerts", [
+    [("alert", 115, False), ("alert", 115, False)],  # plain unknown_psk_identity, twice in a row
+    [("alert", 20, True)],  # authenticated bad_record_mac
+])
+def test_key_alert_on_reconnect_ends_the_stream(make_streamer, scripted, alerts):
+    actions = scripted([("break_after", 2)] + alerts)
     reader = _FakeReader(uniform_layer(SIZES, (90, 90, 90)))
     s = make_streamer(reader)
     assert _run(s, 2)  # ended by itself instead of retrying every 30 s
-    assert "unknown_psk_identity (115)" in s.error
-    assert len(_ScriptedDTLS.clients) == 2
+    assert "bridge rejected the reconnect" in s.error
+    assert len(_ScriptedDTLS.clients) == 1 + len(alerts)
     assert actions[-1] == "stop" and not s.running and reader.fast is False
+
+
+@pytest.mark.parametrize("alerts", [
+    [("alert", 115, False), "ok"],  # a single plain key alert may be a stray one
+    [("alert", 80, True)] * 4 + ["ok"],  # internal_error: the bridge may recover
+    [("alert", 115, False), ("alert", 51, False), "ok"],  # not the same alert twice
+])
+def test_other_alerts_on_reconnect_keep_the_backoff(make_streamer, scripted, alerts):
+    scripted([("break_after", 2)] + alerts)
+    reader = _FakeReader(uniform_layer(SIZES, (90, 90, 90)))
+    s = make_streamer(reader)
+    assert not _run(s, 2.0)
+    assert s.error is None
+    assert len(_ScriptedDTLS.clients) == 2 + len(alerts) - 1
+    assert _ScriptedDTLS.clients[-1].sent > 0 and s.link == "connected"
+
+
+def test_rejects_our_key_rules():
+    A = streamer_mod.DTLSAlert
+    assert streamer_mod.rejects_our_key(A(2, 115, True), None)
+    assert not streamer_mod.rejects_our_key(A(2, 115), None)
+    assert streamer_mod.rejects_our_key(A(2, 115), 115)
+    assert not streamer_mod.rejects_our_key(A(2, 80, True), 80)
+    assert not streamer_mod.rejects_our_key(A(1, 20, True), None)  # warning level
+    assert not streamer_mod.rejects_our_key(streamer_mod.DTLSError("x"), 115)
 
 
 def test_stop_during_the_stop_request_skips_start_and_handshake(make_streamer, scripted, monkeypatch):
@@ -291,22 +326,48 @@ def test_stop_during_the_stop_request_skips_start_and_handshake(make_streamer, s
     assert restored and not s.running and reader.fast is False
 
 
-def _status_get(statuses):
-    """Fake requests.get: the first call answers the channel list, later ones pop from `statuses`."""
-    calls = {"n": 0}
+class _FakeHttp:
+    """Stands in for the monitor's requests.Session; answers pop from `answers`, the last one repeats."""
 
-    def get(*a, **k):
-        calls["n"] += 1
-        status = statuses.pop(0) if calls["n"] > 1 and statuses else {"status": "active", "active_streamer": {"rid": "a", "rtype": "auth_v1"}}
-        return _Resp({"data": [{"channels": CHANNELS, **status}]})
+    answers: list = []
+    delay = 0.0
+    calls = 0
 
-    return get
+    def __init__(self):
+        self.headers, self.verify = {}, True
+
+    def get(self, url, timeout=None):
+        _FakeHttp.calls += 1
+        if _FakeHttp.delay:
+            time.sleep(_FakeHttp.delay)
+        answer = _FakeHttp.answers.pop(0) if len(_FakeHttp.answers) > 1 else _FakeHttp.answers[0]
+        if isinstance(answer, Exception):
+            raise answer
+        return _Resp({"data": [answer]})
+
+    def close(self):
+        pass
 
 
-def test_inactive_area_triggers_a_reconnect(make_streamer, scripted, monkeypatch):
+ACTIVE = {"status": "active", "active_streamer": {"rid": "a", "rtype": "auth_v1"}}
+INACTIVE = {"status": "inactive"}
+
+
+@pytest.fixture
+def monitor_http(monkeypatch):
+    monkeypatch.setattr(streamer_mod, "SESSION_CHECK_S", 0.05)
+    monkeypatch.setattr(streamer_mod.requests, "Session", _FakeHttp)
+    _FakeHttp.delay, _FakeHttp.calls = 0.0, 0
+
+    def use(answers, delay=0.0):
+        _FakeHttp.answers, _FakeHttp.delay = list(answers), delay
+
+    return use
+
+
+def test_inactive_area_triggers_a_reconnect(make_streamer, scripted, monitor_http):
     actions = scripted(["ok", "ok"])
-    monkeypatch.setattr(streamer_mod, "SESSION_CHECK_S", 0.1)
-    monkeypatch.setattr(streamer_mod.requests, "get", _status_get([{"status": "inactive"}]))
+    monitor_http([INACTIVE, ACTIVE])
     reader = _FakeReader(uniform_layer(SIZES, (90, 90, 90)))
     s = make_streamer(reader)
     links: list[str] = []
@@ -316,29 +377,58 @@ def test_inactive_area_triggers_a_reconnect(make_streamer, scripted, monkeypatch
     assert first.closed and second.sent > 0
     assert actions[:3] == ["start", "stop", "start"]
     assert links[:2] == ["reconnecting", "connected"]
-    assert s.link == "connected"
+    assert s.link == "connected" and s.error is None
+
+
+def test_area_that_keeps_stopping_ends_the_stream(make_streamer, scripted, monitor_http):
+    scripted([])
+    monitor_http([INACTIVE])
+    reader = _FakeReader(uniform_layer(SIZES, (90, 90, 90)))
+    s = make_streamer(reader)
+    assert _run(s, 3)
+    assert s.error == "entertainment area keeps stopping, another app?"
+    # the first stop and two quick repeats reconnect; the third quick repeat ends the stream
+    assert streamer_mod.INACTIVE_REPEATS_MAX == 3
+    assert len(_ScriptedDTLS.clients) == 1 + streamer_mod.INACTIVE_REPEATS_MAX
+    assert not s.running and reader.fast is False
+
+
+def test_other_active_streamer_is_only_logged_once(make_streamer, scripted, monitor_http, caplog):
+    scripted([])
+    monitor_http([{"status": "active", "active_streamer": {"rid": "someone-else", "rtype": "auth_v1"}}])
+    reader = _FakeReader(uniform_layer(SIZES, (90, 90, 90)))
+    s = make_streamer(reader)
+    assert not _run(s, 0.5)
+    assert _FakeHttp.calls >= 3
+    assert len(_ScriptedDTLS.clients) == 1  # no reconnect
+    warnings = [r for r in caplog.records if "streamed by" in r.getMessage()]
+    assert len(warnings) == 1 and "someone-else" in warnings[0].getMessage() and "a" in warnings[0].args
 
 
 @pytest.mark.parametrize("answer, expected", [
-    ({"status": "active", "active_streamer": {"rid": "a", "rtype": "auth_v1"}}, True),
-    ({"status": "active"}, True),  # bridge does not name the streamer
-    ({"status": "active", "active_streamer": {"rid": "other-app", "rtype": "auth_v1"}}, False),
-    ({"status": "inactive"}, False),
+    (ACTIVE, True),
+    ({"status": "active"}, True),
+    ({"status": "active", "active_streamer": {"rid": "other-app"}}, True),  # logged, not acted on
+    (INACTIVE, False),
     ({"status": "active", "active_streamer": "garbled"}, None),
+    (streamer_mod.requests.ConnectionError("bridge down"), None),
 ])
-def test_session_active_reads_status_and_streamer(make_streamer, monkeypatch, answer, expected):
-    monkeypatch.setattr(streamer_mod.requests, "get", lambda *a, **k: _Resp({"data": [answer]}))
-    s = make_streamer(_FakeReader(uniform_layer(SIZES, (0, 0, 0))))
-    assert s._session_active() is expected
+def test_monitor_check(answer, expected):
+    _FakeHttp.answers, _FakeHttp.delay = [answer], 0.0
+    m = streamer_mod._SessionMonitor("https://bridge.invalid/x", {}, "a")
+    assert m.check(_FakeHttp()) is expected
 
 
-def test_session_active_is_unknown_when_the_bridge_does_not_answer(make_streamer, monkeypatch):
-    def boom(*a, **k):
-        raise streamer_mod.requests.ConnectionError("bridge down")
-
-    monkeypatch.setattr(streamer_mod.requests, "get", boom)
-    s = make_streamer(_FakeReader(uniform_layer(SIZES, (0, 0, 0))))
-    assert s._session_active() is None
+def test_slow_status_request_does_not_delay_sending(make_streamer, scripted, monitor_http):
+    scripted([])
+    monitor_http([ACTIVE], delay=0.4)  # every status request hangs for 0.4 s
+    reader = _FakeReader(uniform_layer(SIZES, (90, 90, 90)))
+    s = make_streamer(reader)
+    assert not _run(s, 1.0)
+    assert _FakeHttp.calls >= 2
+    at = _ScriptedDTLS.clients[0].sent_at
+    gaps = [b - a for a, b in zip(at, at[1:])]
+    assert len(at) > 20 and max(gaps) < 0.15  # 50 Hz loop; a 0.4 s hang would show up here
 
 
 def test_close_notify_from_a_real_session_reconnects(make_streamer, scripted, monkeypatch):
@@ -349,6 +439,8 @@ def test_close_notify_from_a_real_session_reconnects(make_streamer, scripted, mo
 
     actions = scripted([])
     monkeypatch.setattr(dtls, "RETRANSMIT_S", 0.1)
+    monkeypatch.setattr(streamer_mod.requests, "Session", _FakeHttp)
+    _FakeHttp.answers, _FakeHttp.delay = [ACTIVE], 0.0
     bridge = FakeBridge(bytes(16), close_notify_after=5)  # cfg hue_clientkey is "00" * 16
     real = dtls.DTLSClient
     monkeypatch.setattr(streamer_mod, "DTLSClient", lambda host, port, ident, psk, *t: real("127.0.0.1", bridge.port, ident, psk, *t))
