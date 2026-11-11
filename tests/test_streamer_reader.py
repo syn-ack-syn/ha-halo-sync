@@ -149,3 +149,97 @@ def test_stream_sets_fast_and_wakes_the_reader(make_streamer):
     assert reader.woken == 1
     assert reader.fast_seen and all(reader.fast_seen)  # full rate while the stream reads
     assert reader.fast is False  # handed back afterwards
+
+
+# ---- reconnect after a broken DTLS session ---------------------------------
+class _ScriptedDTLS:
+    """Each new client takes the next entry of `script`: "ok", "fail_connect" or ("break_after", n)."""
+
+    script: list = []
+    clients: list = []
+
+    def __init__(self, *a, **k):
+        self.mode = _ScriptedDTLS.script.pop(0) if _ScriptedDTLS.script else "ok"
+        self.sent, self.closed = 0, False
+        _ScriptedDTLS.clients.append(self)
+
+    def connect(self):
+        if self.mode == "fail_connect":
+            raise streamer_mod.DTLSError("handshake timeout: no answer from the bridge")
+
+    def send(self, data):
+        if isinstance(self.mode, tuple) and self.sent >= self.mode[1]:
+            raise OSError("network is unreachable")
+        self.sent += 1
+
+    def close(self):
+        self.closed = True
+
+
+@pytest.fixture
+def scripted(monkeypatch):
+    monkeypatch.setattr(streamer_mod, "RECONNECT_FIRST_S", 0.05)
+    monkeypatch.setattr(streamer_mod, "RECONNECT_MAX_S", 0.2)
+    monkeypatch.setattr(streamer_mod, "DTLSClient", _ScriptedDTLS)
+    _ScriptedDTLS.clients = []
+    actions: list[str] = []
+    monkeypatch.setattr(streamer_mod.requests, "put", lambda url, json=None, **k: actions.append(json["action"]) or _Resp({}))
+
+    def use(script):
+        _ScriptedDTLS.script = list(script)
+        return actions
+
+    return use
+
+
+def test_next_reconnect_pause_doubles_up_to_30_s():
+    pauses, p = [], streamer_mod.RECONNECT_FIRST_S
+    for _ in range(7):
+        pauses.append(p)
+        p = streamer_mod.next_reconnect_pause(p)
+    assert pauses == [1, 2, 4, 8, 16, 30, 30]
+
+
+def test_broken_link_reconnects_and_keeps_full_rate(make_streamer, scripted):
+    actions = scripted([("break_after", 3), "fail_connect", "ok"])
+    reader = _FakeReader(uniform_layer(SIZES, (90, 90, 90)))
+    s = make_streamer(reader)
+    links: list[str] = []
+    s._on_change = lambda: links.append(s.link)
+    assert not _run(s, 1.0)  # still streaming when stopped
+    first, failed, third = _ScriptedDTLS.clients[:3]
+    assert first.closed and failed.closed
+    assert third.sent > 0  # streaming resumed on the new session
+    assert actions[:5] == ["start", "stop", "start", "stop", "start"]  # area restarted for every attempt
+    assert actions[-1] == "stop"  # final stop by _run
+    assert "reconnecting" in links and links[links.index("reconnecting"):].count("connected") >= 1
+    assert s.link == "connected" and "hue_link" not in s.stats
+    assert reader.fast_seen and all(reader.fast_seen)  # the reader stayed at full rate while reconnecting
+    assert reader.fast is False and reader.woken == 1
+    assert s.error is None
+
+
+def test_stop_while_reconnecting_restores_the_lights(make_streamer, scripted):
+    actions = scripted([("break_after", 2)] + ["fail_connect"] * 50)
+    reader = _FakeReader(uniform_layer(SIZES, (90, 90, 90)))
+    s = make_streamer(reader)
+    snap = {"light-1": {"on": {"on": True}}}
+    restored: list[dict] = []
+    s._snapshot_lights = lambda: snap
+    s._restore_lights = restored.append
+    assert not _run(s, 0.6)
+    assert len(_ScriptedDTLS.clients) >= 3  # kept trying while the stream was on
+    assert s.stats.get("hue_link") == "reconnecting" and "handshake timeout" in s.stats["hue_link_error"]
+    assert actions[-1] == "stop"
+    assert restored and restored[0] is snap
+    assert not s.running and reader.fast is False
+
+
+def test_failed_first_connect_ends_the_stream(make_streamer, scripted):
+    scripted(["fail_connect"])
+    reader = _FakeReader(uniform_layer(SIZES, (90, 90, 90)))
+    s = make_streamer(reader)
+    assert _run(s, 2)
+    assert "handshake timeout" in s.error
+    assert len(_ScriptedDTLS.clients) == 1 and _ScriptedDTLS.clients[0].closed
+    assert reader.fast is False
