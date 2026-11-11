@@ -35,6 +35,8 @@ ALERT_FATAL = 2
 KEY_ALERTS = frozenset({115, 51, 20})
 KEY_SUSPECT_MAX_S = 300.0  # backoff cap while plain key alerts suggest the bridge rejects our key
 KEY_SUSPECT_ERROR = "bridge rejects the client key?"
+# Stop reasons after which the "lights off with TV" option turns the lights off instead of restoring them.
+TV_OFF_REASONS = ("tv_standby", "tv_off")
 
 
 class TvGone(RuntimeError):
@@ -60,6 +62,18 @@ def rejects_our_key(exc: BaseException) -> bool:
     forged by anyone on the LAN, so they never end the stream (see KEY_SUSPECT_ERROR).
     """
     return key_alert(exc) is not None and exc.authenticated
+
+
+def ends_with_lights_off(stop_reason: str | None, off_with_tv: bool) -> bool:
+    """Whether the lights go off when the stream ends: the option is on and the TV ended the stream."""
+    return off_with_tv and stop_reason in TV_OFF_REASONS
+
+
+def lights_after_stop(snap: dict[str, dict], stop_reason: str | None, off_with_tv: bool) -> dict[str, dict]:
+    """The light states to put back after a stream: the snapshot, or all off if the TV ended it."""
+    if ends_with_lights_off(stop_reason, off_with_tv):
+        return {rid: {"on": {"on": False}} for rid in snap}
+    return snap
 
 
 class _SessionMonitor:
@@ -351,6 +365,10 @@ class Streamer:
         self.error: str | None = None
         # Why the last stream ended: "user", "tv_standby", "tv_off", "error"; start() resets it to None.
         self.stop_reason: str | None = None
+        # Why the last stream ended, fixed when it ended; stop_reason may change right after.
+        self.end_reason: str | None = None
+        # Turn the Hue lights off instead of restoring them when the TV ends the stream; set by the manager.
+        self.lights_off_with_tv: bool = False
         self.stats: dict = {}
         self.link = "connected"  # DTLS session to the bridge: "connected" or "reconnecting"
 
@@ -464,6 +482,11 @@ class Streamer:
                 if self.stop_reason is None:
                     self.stop_reason = "tv_off" if isinstance(exc, TvGone) else "error"
         finally:
+            # Read why the stream ended before anything else: a stop() during the bridge call or
+            # the change callback below would overwrite it with "user".
+            with self._lock:
+                reason = self.stop_reason
+            self.end_reason = reason
             self.reader.fast = False
             self._stop.set()
             try:
@@ -474,11 +497,13 @@ class Streamer:
             self.extra_out = []
             self._on_change()
             if snap:
+                # Turning off takes the same twice-sent, faded way as restoring, or the bridge turns them on again.
+                target = lights_after_stop(snap, reason, self.lights_off_with_tv)
                 with _RESTORE_LOCK:
-                    self._restore_lights(snap)
+                    self._restore_lights(target)
                     time.sleep(0.4)
                     if not self.running:  # the bridge may still be settling from the stream; repeat once
-                        self._restore_lights(snap)
+                        self._restore_lights(target)
 
     def _open_link(self, timeout: float = 5.0) -> DTLSClient | None:
         """Start the entertainment area on the bridge and open the DTLS session to it.

@@ -26,7 +26,7 @@ def _lights(hass: HomeAssistant) -> list[dict]:
 
 @callback
 def async_register(hass: HomeAssistant) -> None:
-    for cmd in (ws_get, ws_activate, ws_save, ws_delete, ws_run, ws_auto_resume, ws_reset, ws_refresh_positions, ws_subscribe, ws_connection_test):
+    for cmd in (ws_get, ws_activate, ws_save, ws_delete, ws_run, ws_auto_resume, ws_lights_off_with_tv, ws_reset, ws_refresh_positions, ws_subscribe, ws_connection_test):
         websocket_api.async_register_command(hass, cmd)
 
 
@@ -147,6 +147,17 @@ async def ws_run(hass, connection, msg):
 async def ws_auto_resume(hass, connection, msg):
     mgr = _manager(hass, msg.get("entry_id"))
     await mgr.async_set_auto_resume(msg["enabled"])
+    _reply(hass, connection, msg, mgr)
+
+
+@websocket_api.websocket_command(
+    {vol.Required("type"): f"{DOMAIN}/lights_off_with_tv", vol.Optional("entry_id"): str, vol.Required("enabled"): bool}
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_lights_off_with_tv(hass, connection, msg):
+    mgr = _manager(hass, msg.get("entry_id"))
+    await mgr.async_set_lights_off_with_tv(msg["enabled"])
     _reply(hass, connection, msg, mgr)
 
 
