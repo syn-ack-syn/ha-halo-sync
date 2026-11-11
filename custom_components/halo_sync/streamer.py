@@ -480,6 +480,10 @@ class Streamer:
                 if self.stop_reason is None:
                     self.stop_reason = "tv_off" if isinstance(exc, TvGone) else "error"
         finally:
+            # Read why the stream ended before anything else: a stop() during the bridge call or
+            # the change callback below would overwrite it with "user".
+            with self._lock:
+                reason = self.stop_reason
             self.reader.fast = False
             self._stop.set()
             try:
@@ -490,8 +494,6 @@ class Streamer:
             self.extra_out = []
             self._on_change()
             if snap:
-                with self._lock:
-                    reason = self.stop_reason
                 # Turning off takes the same twice-sent, faded way as restoring, or the bridge turns them on again.
                 target = lights_after_stop(snap, reason, self.lights_off_with_tv)
                 with _RESTORE_LOCK:
