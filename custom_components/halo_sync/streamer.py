@@ -68,7 +68,12 @@ class _SessionMonitor:
 
     stop() does not wait for a request in flight: the thread may outlive the bounded join until
     that request returns or times out (SESSION_HTTP_TIMEOUT). Once stopped it never sets `inactive`.
+    `running` / `peak` count the _run loops alive across all monitors (for tests and diagnostics).
     """
+
+    running = 0
+    peak = 0
+    _count_lock = threading.Lock()
 
     def __init__(self, url: str, headers: dict, appid: str):
         self.url, self.headers, self.appid = url, headers, appid
@@ -92,11 +97,16 @@ class _SessionMonitor:
         with self._lock:
             http = self._http
         if http is not None:
-            http.close()  # drops pooled connections; may cut a request in flight short, else its timeout ends it
+            # Closes only idle pooled connections; a request in flight runs on until SESSION_HTTP_TIMEOUT.
+            http.close()
         if self._thread.is_alive() and self._thread is not threading.current_thread():
             self._thread.join(timeout=0.5)
 
     def _run(self) -> None:
+        cls = type(self)
+        with cls._count_lock:
+            cls.running += 1
+            cls.peak = max(cls.peak, cls.running)
         try:
             while not self._stop.wait(SESSION_CHECK_S):
                 with self._lock:
@@ -115,6 +125,8 @@ class _SessionMonitor:
                 http, self._http = self._http, None
             if http is not None:
                 http.close()
+            with cls._count_lock:
+                cls.running -= 1
 
     def check(self, http) -> bool | None:
         """False if the area is no longer active, True if it is, None if the answer is unusable.

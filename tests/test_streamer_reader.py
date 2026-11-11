@@ -299,6 +299,14 @@ def test_rejects_our_key_rules():
 def test_forged_plain_key_alerts_show_an_error_but_the_stream_recovers(make_streamer, scripted, monkeypatch):
     """Two plain unknown_psk_identity alerts (anyone on the LAN can send them) never end the stream."""
     monkeypatch.setattr(streamer_mod, "KEY_SUSPECT_MAX_S", 0.3)
+    caps: list = []
+    real_pause = streamer_mod.next_reconnect_pause
+
+    def pause(p, cap=None):
+        caps.append(cap)
+        return real_pause(p, cap)
+
+    monkeypatch.setattr(streamer_mod, "next_reconnect_pause", pause)
     scripted([("break_after", 2), ("alert", 115, False), ("alert", 115, False), "ok"])
     reader = _FakeReader(uniform_layer(SIZES, (90, 90, 90)))
     s = make_streamer(reader)
@@ -306,8 +314,20 @@ def test_forged_plain_key_alerts_show_an_error_but_the_stream_recovers(make_stre
     s._on_change = lambda: errors.append(s.error)
     assert not _run(s, 2.0)  # still on
     assert streamer_mod.KEY_SUSPECT_ERROR in errors  # shown while it looked like a wrong key
+    assert caps[:2] == [None, streamer_mod.KEY_SUSPECT_MAX_S]  # the second same alert raises the cap
     assert s.error is None  # cleared by the successful reconnect
     assert _ScriptedDTLS.clients[-1].sent > 0 and s.link == "connected"
+
+
+def test_single_plain_key_alert_sets_no_error(make_streamer, scripted):
+    scripted([("break_after", 2), ("alert", 115, False), "ok"])
+    reader = _FakeReader(uniform_layer(SIZES, (90, 90, 90)))
+    s = make_streamer(reader)
+    errors: list = []
+    s._on_change = lambda: errors.append(s.error)
+    assert not _run(s, 1.0)
+    assert len(_ScriptedDTLS.clients) == 3 and _ScriptedDTLS.clients[-1].sent > 0
+    assert streamer_mod.KEY_SUSPECT_ERROR not in errors and s.error is None
 
 
 def test_key_suspect_backoff_goes_up_to_300_s():
@@ -435,24 +455,19 @@ def test_at_most_one_monitor_thread_is_alive(make_streamer, scripted, monitor_ht
     monitor_http([ACTIVE], delay=1.0)
     reader = _FakeReader(uniform_layer(SIZES, (90, 90, 90)))
     s = make_streamer(reader)
-    peak, done = [0], threading.Event()
-
-    def watch():
-        while not done.is_set():
-            peak[0] = max(peak[0], sum(t.name == "halo_sync_session" and t.is_alive() for t in threading.enumerate()))
-            time.sleep(0.005)
-
-    w = threading.Thread(target=watch, daemon=True)
-    w.start()
+    mon = streamer_mod._SessionMonitor
+    deadline = time.monotonic() + 3
+    while mon.running and time.monotonic() < deadline:  # monitors of earlier tests may still hang
+        time.sleep(0.02)
+    assert mon.running == 0
+    mon.peak = 0
     assert not _run(s, 2.5)
     deadline = time.monotonic() + 3
-    while any(t.name == "halo_sync_session" for t in threading.enumerate()) and time.monotonic() < deadline:
+    while mon.running and time.monotonic() < deadline:
         time.sleep(0.02)
-    done.set()
-    w.join(1)
     assert len(_ScriptedDTLS.clients) >= 4  # many reconnects
     assert _FakeHttp.calls >= 2  # monitors did run
-    assert peak[0] == 1
+    assert mon.running == 0 and mon.peak == 1
 
 
 @pytest.mark.parametrize("answer, expected", [
