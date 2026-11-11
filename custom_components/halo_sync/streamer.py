@@ -10,10 +10,10 @@ import time
 from collections.abc import Callable
 
 import requests
-from requests.auth import HTTPDigestAuth
 
 from .const import CHROMA_FULL_LEVEL, DARK_CONTENT_LEVELS, DARK_LEVEL, SEND_HZ, TV_GIVEUP_S
 from .dtls import DTLSClient
+from .tv_reader import TvReader
 from .zones import ZoneSampler
 
 _LOGGER = logging.getLogger(__name__)
@@ -207,8 +207,9 @@ class _Ramp:
 class Streamer:
     """Owns one streaming session at a time; start/stop are thread-safe."""
 
-    def __init__(self, cfg: dict, settings: dict, on_change: Callable[[], None]):
+    def __init__(self, cfg: dict, settings: dict, on_change: Callable[[], None], *, reader: TvReader):
         self.cfg = cfg
+        self.reader = reader  # owned by the manager; the stream only reads its latest frame
         self.settings = settings  # live preset values, read every frame
         self.extra_positions: list[tuple[float, float]] = []  # non-Hue lights, set by the manager
         self.extra_out: list[list[float]] = []  # smoothed RGB (0..1, brightness applied) for those lights
@@ -321,7 +322,7 @@ class Streamer:
             _LOGGER.warning("Halo Sync stopped: %s", exc)
             self.error = str(exc)
         finally:
-            self._stop.set()  # also ends the TV reader thread after a failure
+            self._stop.set()
             try:
                 requests.put(self._cfg_url, json={"action": "stop"}, headers=self._hue_headers, verify=False, timeout=5)
             except requests.RequestException:
@@ -339,37 +340,29 @@ class Streamer:
     def _stream(self) -> None:
         cfg = self.cfg
         chans = self.refresh_positions()
-        latest: dict = {"hue": None, "extra": [], "t": time.time()}
-        reads: list[float] = []
-        tv_base = f"https://{cfg['tv_host']}:1926/6/ambilight"
-
+        latest: dict = {"hue": None, "extra": [], "seen": None}
+        tv = self.reader
         sampler, sampler_extra = ZoneSampler(), ZoneSampler()
+        mono_start = time.monotonic()
+        standby_since: float | None = None
+        reads_at_stats = tv.read_count
 
-        def reader() -> None:
-            s = requests.Session()
-            s.auth, s.verify = HTTPDigestAuth(cfg["tv_user"], cfg["tv_pass"]), False
-            while not self._stop.is_set():
-                t0 = time.perf_counter()
-                try:
-                    layer = s.get(f"{tv_base}/measured", timeout=2).json()["layer1"]
-                except (requests.RequestException, ValueError, KeyError):
-                    time.sleep(0.2)
-                    continue
-                reads.append((time.perf_counter() - t0) * 1000)
-                s_ = self.settings
-                sat = active_params(s_)["saturation"]
-                mode, spread, count = s_.get("zone_mode", "smooth"), s_["spread"], int(s_.get("zone_count", 3))
-                nz = s_.get("native_zones") or {}
-                hue_pos = [self._pos.get(c["id"], (c["x"], c["z"])) for c in chans]
-                hue_zones = [nz.get(str(c["id"])) for c in chans]
-                extra_pos = list(self.extra_positions)
-                extra_zones = [None] * len(extra_pos)
-                latest["hue"] = sampler.sample(layer, hue_pos, mode, spread, count, hue_zones, sat)
-                latest["extra"] = sampler_extra.sample(layer, extra_pos, mode, spread, count, extra_zones, sat)
-                latest["t"] = time.time()
-                time.sleep(0.03)
-
-        threading.Thread(target=reader, name="halo_sync_tv", daemon=True).start()
+        def sample_new_frame(mono: float) -> None:
+            """Sample the reader's latest frame once, if it is new and not older than TV_GIVEUP_S."""
+            layer, at = tv.latest_measured, tv.latest_at
+            if layer is None or at is None or at == latest["seen"] or mono - at > TV_GIVEUP_S:
+                return
+            latest["seen"] = at
+            s_ = self.settings
+            sat = active_params(s_)["saturation"]
+            mode, spread, count = s_.get("zone_mode", "smooth"), s_["spread"], int(s_.get("zone_count", 3))
+            nz = s_.get("native_zones") or {}
+            hue_pos = [self._pos.get(c["id"], (c["x"], c["z"])) for c in chans]
+            hue_zones = [nz.get(str(c["id"])) for c in chans]
+            extra_pos = list(self.extra_positions)
+            extra_zones = [None] * len(extra_pos)
+            latest["hue"] = sampler.sample(layer, hue_pos, mode, spread, count, hue_zones, sat)
+            latest["extra"] = sampler_extra.sample(layer, extra_pos, mode, spread, count, extra_zones, sat)
 
         r = requests.put(self._cfg_url, json={"action": "start"}, headers=self._hue_headers, verify=False, timeout=5)
         if r.status_code != 200:
@@ -388,8 +381,19 @@ class Streamer:
             while not self._stop.is_set():
                 now = time.time()
                 dt, last = now - last, now
-                if now - latest["t"] > TV_GIVEUP_S:
-                    raise RuntimeError("TV stopped answering")
+                mono = time.monotonic()
+                if tv.state == "standby":
+                    standby_since = mono if standby_since is None else standby_since
+                    if mono - standby_since > TV_GIVEUP_S:
+                        _LOGGER.info("Halo Sync stopped: the TV is in standby")
+                        return  # _run stops the entertainment area and restores the lights
+                else:
+                    standby_since = None
+                    # In standby the reader polls slowly (or not at all while the TV is off), so
+                    # stale frames only count as a failure while the TV is not known to sleep.
+                    if mono - max(tv.latest_at or 0.0, mono_start) > TV_GIVEUP_S:
+                        raise RuntimeError("TV stopped answering")
+                sample_new_frame(mono)
                 p = active_params(self.settings)
                 tau_c = max(p["smoothing_color"], 1) / 1000
                 tau_l = max(p["smoothing_brightness"], 1) / 1000
@@ -429,10 +433,11 @@ class Streamer:
                         smoothed_x = extra_s.step(latest["extra"], dt, tau_c, tau_l)
                     cur_x = [tone(rgb, s) for rgb in smoothed_x]
                     self.extra_out = extra_r.step(now, cur_x, delay)
-                if now - last_stats > 10 and reads:
-                    v = sorted(reads)
-                    self.stats = {"tv_reads_per_s": round(len(v) / (now - last_stats), 1), "tv_read_median_ms": round(v[len(v) // 2])}
-                    reads.clear()
+                if now - last_stats > 10 and tv.read_count > reads_at_stats:
+                    v = sorted(tv.read_times_ms())
+                    n = tv.read_count - reads_at_stats
+                    self.stats = {"tv_reads_per_s": round(n / (now - last_stats), 1), "tv_read_median_ms": round(v[len(v) // 2]) if v else None}
+                    reads_at_stats = tv.read_count
                     last_stats = now
                     self._on_change()
                 time.sleep(1 / SEND_HZ)

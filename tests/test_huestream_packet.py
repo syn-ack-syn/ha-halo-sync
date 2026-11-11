@@ -1,7 +1,7 @@
 """HueStream v2 packets as Streamer._stream builds them.
 
 The packet is assembled inline in the stream loop, so the loop runs here once against fakes: a fake
-TV session (no network), fake bridge REST calls and a fake DTLS client that records what is sent
+TV reader (no network), fake bridge REST calls and a fake DTLS client that records what is sent
 and stops the stream after the first packets.
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import struct
 import threading
+import time
 
 import pytest
 
@@ -32,14 +33,17 @@ class _Resp:
         return self._data
 
 
-class _FakeTvSession:
-    def __init__(self, layer):
-        self._layer = layer
-        self.auth = self.verify = None
+class _FakeTvReader:
+    """Stands in for TvReader: one fresh frame, TV on."""
 
-    def get(self, url, timeout=None):
-        assert url.endswith("/measured")
-        return _Resp({"layer1": self._layer})
+    def __init__(self, layer):
+        self.latest_measured = layer
+        self.latest_at = time.monotonic()
+        self.state = "ok"
+        self.read_count = 1
+
+    def read_times_ms(self):
+        return [10.0]
 
 
 class _FakeDTLS:
@@ -57,6 +61,10 @@ class _FakeDTLS:
 
     def close(self):
         pass
+
+
+def _no_session():
+    raise AssertionError("the stream must read the TV through the reader, not open a session")
 
 
 @pytest.fixture
@@ -77,12 +85,12 @@ def packets(monkeypatch, sizes_3side):
         "smoothing_color": 1, "smoothing_brightness": 1, "spread": 0.8, "gain": 1.0, "curve": 1.0,
         "zone_mode": "nearest", "native_delay": 0,
     }
-    monkeypatch.setattr(streamer_mod.requests, "Session", lambda: _FakeTvSession(layer))
+    monkeypatch.setattr(streamer_mod.requests, "Session", _no_session)
     monkeypatch.setattr(streamer_mod.requests, "get", lambda *a, **k: _Resp({"data": [{"channels": CHANNELS}]}))
     monkeypatch.setattr(streamer_mod.requests, "put", lambda *a, **k: _Resp({}))
     monkeypatch.setattr(streamer_mod, "DTLSClient", _FakeDTLS)
 
-    s = streamer_mod.Streamer(cfg, settings, on_change=lambda: None)
+    s = streamer_mod.Streamer(cfg, settings, on_change=lambda: None, reader=_FakeTvReader(layer))
     _FakeDTLS.stop = s._stop
     _FakeDTLS.instance = None  # never reuse the client (and packets) of a previous test
     errors: list[BaseException] = []
