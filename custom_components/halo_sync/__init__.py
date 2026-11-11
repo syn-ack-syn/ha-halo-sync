@@ -69,7 +69,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     mgr: Manager = entry.runtime_data
-    await mgr.async_stop()
+    await mgr.async_shutdown()
     if mgr.adb:
         await mgr.adb.stop()
     if not [e for e in hass.config_entries.async_loaded_entries(DOMAIN) if e.entry_id != entry.entry_id]:
