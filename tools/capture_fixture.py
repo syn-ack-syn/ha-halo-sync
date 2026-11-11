@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Record anonymised JointSpace v6 responses from a Philips TV as test fixtures.
 
-Usage (TV on, Ambilight running, a video playing for the timing part):
+Usage (TV on, Ambilight running; for a meaningful change rate a video should be playing):
 
     HALO_TV_HOST=... HALO_TV_USER=... HALO_TV_PASS=... \\
-        uv run --locked python tools/capture_fixture.py [--out DIR] [--dauer 20] [--hz 10]
+        uv run --locked python tools/capture_fixture.py --bild static|moving [--out DIR] [--dauer 20] [--hz 10]
+
+--bild is required and records what the screen showed during the timing run ("picture" in
+timing.json): with a static picture the change rate says nothing about the update rate.
 
 Writes into the output directory (default tests/fixtures/55pus7373/):
 
@@ -14,7 +17,7 @@ Writes into the output directory (default tests/fixtures/55pus7373/):
     topology.json          /6/ambilight/topology
     measured_NN.json       20 samples of /6/ambilight/measured, 100 ms apart
     processed_NN.json      20 samples of /6/ambilight/processed, 100 ms apart
-    timing.json            response times and change rate per endpoint
+    timing.json            picture type, response times and change rate per endpoint
 
 The TV API is fragile: every request goes through one requests.Session (keep-alive), requests
 are never run in parallel, any two requests start at least 100 ms apart and failures back off
@@ -23,7 +26,9 @@ with a growing pause. A 401 stops at once without retrying.
 Everything is first written to a temporary directory next to the output directory and checked
 for personal data (IP or MAC addresses, "serialnumber", "user", "password", the host and the
 credentials). Only if that check passes does the temporary directory replace the output
-directory; otherwise it is deleted and the script exits with a non-zero code. Host, user and
+directory; otherwise it is deleted and the script exits with a non-zero code. The output
+directory may only contain *.json files (a guard against --out pointing at a parent folder
+such as tests/fixtures), otherwise the script stops before contacting the TV. Host, user and
 password are read from the environment only and never written to files or printed.
 """
 
@@ -55,6 +60,7 @@ BACKOFF_MAX_S = 30.0
 MAX_CONSECUTIVE_ERRORS = 6
 SYSTEM_KEEP = ("api_version", "model")
 ENDPOINTS = ("measured", "processed")
+PICTURES = ("static", "moving")
 DEFAULT_OUT = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "55pus7373"
 
 IP_RE = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
@@ -248,45 +254,80 @@ def _write(path: Path, data: Any) -> None:
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
 
 
+def check_out_dir(out_dir: Path) -> None:
+    """The output directory is replaced as a whole, so it may only hold fixture files (*.json)."""
+    if not out_dir.exists():
+        return
+    if not out_dir.is_dir():
+        raise CaptureError(f"{out_dir} is not a directory")
+    other = sorted(p.name for p in out_dir.iterdir() if not (p.is_file() and p.suffix == ".json"))
+    if other:
+        raise CaptureError(
+            f"{out_dir} contains {', '.join(other)}; it would be replaced as a whole, choose a fixture directory"
+        )
+
+
+def _swap_into_place(tmp: Path, out_dir: Path) -> None:
+    """Replace out_dir with tmp; if that fails, the previous out_dir is put back."""
+    old = None
+    if out_dir.exists():
+        old = Path(tempfile.mkdtemp(prefix=f".{out_dir.name}.old-", dir=out_dir.parent))
+        os.replace(out_dir, old / out_dir.name)
+    try:
+        os.replace(tmp, out_dir)
+    except BaseException:
+        if old is not None:
+            os.replace(old / out_dir.name, out_dir)
+            shutil.rmtree(old, ignore_errors=True)
+        raise
+    if old is not None:
+        shutil.rmtree(old)
+
+
 def capture(
     cap: Capture,
     out_dir: Path,
     *,
+    picture: str,
     dauer: float,
     hz: float,
     secrets: list[str],
     today: str | None = None,
 ) -> dict:
     """Capture into a temporary sibling of out_dir and move it into place only if it is clean."""
+    if picture not in PICTURES:
+        raise ValueError(f"picture must be one of {PICTURES}")
     out_dir = Path(out_dir)
+    check_out_dir(out_dir)
     out_dir.parent.mkdir(parents=True, exist_ok=True)
     tmp = Path(tempfile.mkdtemp(prefix=f".{out_dir.name}.tmp-", dir=out_dir.parent))
     try:
-        timing = _capture_into(cap, tmp, dauer=dauer, hz=hz, today=today)
+        timing = _capture_into(cap, tmp, picture=picture, dauer=dauer, hz=hz, today=today)
         bad = check_no_leaks(tmp, secrets)
         if bad:
             raise CaptureError(f"possible personal data in {', '.join(bad)}, nothing was written")
-        old = None
-        if out_dir.exists():
-            old = Path(tempfile.mkdtemp(prefix=f".{out_dir.name}.old-", dir=out_dir.parent))
-            os.replace(out_dir, old / out_dir.name)
-        os.replace(tmp, out_dir)
-        if old is not None:
-            shutil.rmtree(old)
+        _swap_into_place(tmp, out_dir)
     except BaseException:
         shutil.rmtree(tmp, ignore_errors=True)
         raise
     return timing
 
 
-def _capture_into(cap: Capture, out_dir: Path, *, dauer: float, hz: float, today: str | None) -> dict:
+def timing_note(picture: str) -> str:
+    note = "fixture_samples: 20 requests 100 ms apart. timing_run: sequential runs per endpoint"
+    if picture == "static":
+        return note + ", static picture, so changes_per_second does not show the update rate."
+    return note + ", moving picture."
+
+
+def _capture_into(cap: Capture, out_dir: Path, *, picture: str, dauer: float, hz: float, today: str | None) -> dict:
 
     system = cap.get("/6/system")
     _write(out_dir / "system.json", anonymize_system(system))
 
     power = cap.get("/6/powerstate")
     if not isinstance(power, dict) or power.get("powerstate") != "On":
-        raise CaptureError(f"TV is not on (powerstate {power!r}), switch it on and start a video")
+        raise CaptureError(f"TV is not on (powerstate {power!r}), switch it on")
     _write(out_dir / "powerstate_on.json", power)
 
     _write(out_dir / "topology.json", cap.get("/6/ambilight/topology"))
@@ -299,17 +340,18 @@ def _capture_into(cap: Capture, out_dir: Path, *, dauer: float, hz: float, today
             _write(out_dir / f"{ep}_{i:02d}.json", s.body)
         fixture_timing[ep] = {"requests": len(samples), "errors": len(samples) - len(ok), "response_ms": response_stats(samples)}
 
-    video = {}
+    timing_run = {}
     for ep in ENDPOINTS:
-        cap.log(f"measuring {ep} for {dauer:g} s at {hz:g} Hz, keep the video playing")
+        cap.log(f"measuring {ep} for {dauer:g} s at {hz:g} Hz ({picture} picture)")
         samples = cap.sample(f"/6/ambilight/{ep}", interval=1 / hz, dauer=dauer)
-        video[ep] = summarize(samples, dauer, hz)
+        timing_run[ep] = summarize(samples, dauer, hz)
 
     timing = {
         "captured": today or date.today().isoformat(),
-        "note": "fixture_samples: 20 requests 100 ms apart; video: sequential runs per endpoint with a video playing",
+        "picture": picture,
+        "note": timing_note(picture),
         "fixture_samples": fixture_timing,
-        "video": video,
+        "timing_run": timing_run,
     }
     _write(out_dir / "timing.json", timing)
     return timing
@@ -329,8 +371,14 @@ def make_session(user: str, password: str):  # pragma: no cover - needs a real T
 
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    p.add_argument(
+        "--bild",
+        required=True,
+        choices=PICTURES,
+        help="what the screen shows during the timing run: static (e.g. a menu) or moving (a video)",
+    )
     p.add_argument("--out", type=Path, default=DEFAULT_OUT, help=f"output directory (default {DEFAULT_OUT})")
-    p.add_argument("--dauer", type=float, default=20.0, metavar="SEKUNDEN", help="seconds per endpoint for the video timing run (default 20)")
+    p.add_argument("--dauer", type=float, default=20.0, metavar="SEKUNDEN", help="seconds per endpoint for the timing run (default 20)")
     p.add_argument("--hz", type=float, default=10.0, help=f"request rate for the timing run, at most {MAX_HZ:g} (default 10)")
     args = p.parse_args(argv)
     if not 0 < args.hz <= MAX_HZ:
@@ -350,7 +398,7 @@ def main(argv: list[str] | None = None, session_factory: Callable[[str, str], An
         return 2
     cap = Capture(session_factory(user, password), f"https://{host}:{PORT}")
     try:
-        timing = capture(cap, args.out, dauer=args.dauer, hz=args.hz, secrets=[host, user, password])
+        timing = capture(cap, args.out, picture=args.bild, dauer=args.dauer, hz=args.hz, secrets=[host, user, password])
     except CaptureError as err:
         print(f"error: {err}", file=sys.stderr)
         return 1
@@ -358,7 +406,7 @@ def main(argv: list[str] | None = None, session_factory: Callable[[str, str], An
         close = getattr(cap.session, "close", None)
         if close:
             close()
-    for ep, v in timing["video"].items():
+    for ep, v in timing["timing_run"].items():
         print(f"{ep}: {v['changes_per_second_mean']} changes/s, response ms {v['response_ms']}, errors {v['errors']}")
     print(f"written to {args.out}")
     return 0

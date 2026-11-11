@@ -22,8 +22,32 @@
       }
     }
   },
-  "note": "fixture_samples: 20 requests 100 ms apart. video: sequential runs per endpoint; during this capture the picture was static (Apple TV home screen), so changes_per_second is 0. A separate run with a moving picture on 2026-11-11 gave measured 8.5 and processed 9.4 changes/s at 10 Hz, median response 26 ms.",
-  "video": {
+  "moving_reference": {
+    "captured": "2026-11-11",
+    "duration_s": 10,
+    "measured": {
+      "changes": 85,
+      "requests": 94,
+      "response_ms": {
+        "median": 26,
+        "p95": 33
+      }
+    },
+    "note": "Separate run, one session, 10 s per endpoint. The change count hits the polling rate, so the real update rate may be higher. The difference between measured and processed is not a reason to choose either endpoint.",
+    "picture": "moving",
+    "processed": {
+      "changes": 94,
+      "requests": 95,
+      "response_ms": {
+        "median": 26,
+        "p95": 33
+      }
+    },
+    "target_hz": 10
+  },
+  "note": "fixture_samples: 20 requests 100 ms apart. timing_run: sequential runs per endpoint, static picture (Apple TV home screen), so changes_per_second does not show the update rate. moving_reference: separate run with a moving picture.",
+  "picture": "static",
+  "timing_run": {
     "measured": {
       "answers_per_second": [
         9,

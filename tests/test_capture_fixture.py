@@ -111,6 +111,7 @@ class FakeSession:
 
 def _capture(clock, session, tmp_path, **kw):
     cap = cf.Capture(session, "https://tv.example:1926", clock=clock, sleep=clock.sleep, log=lambda m: None)
+    kw.setdefault("picture", "moving")
     kw.setdefault("dauer", 3)
     kw.setdefault("hz", 10)
     kw.setdefault("secrets", list(SECRETS.values()))
@@ -149,7 +150,7 @@ def test_capture_never_overlaps_and_respects_the_rate(tmp_path):
     clock = FakeClock()
     session = FakeSession(clock, latency={"/6/ambilight/measured": 0.03})
     timing = _capture(clock, session, tmp_path, dauer=2, hz=10)
-    v = timing["video"]["measured"]
+    v = timing["timing_run"]["measured"]
     assert v["errors"] == 0
     assert 19 <= v["requests"] <= 21  # 10 Hz for 2 s
     assert sum(v["answers_per_second"]) == v["requests"]
@@ -245,22 +246,88 @@ def test_video_timing_sees_frame_rate(tmp_path):
     session = FakeSession(clock, frame_every=0.2)  # content changes 5 times per second
     timing = _capture(clock, session, tmp_path, dauer=4, hz=10)
     for ep in ("measured", "processed"):
-        assert 4 <= timing["video"][ep]["changes_per_second_mean"] <= 5
+        assert 4 <= timing["timing_run"][ep]["changes_per_second_mean"] <= 5
     saved = json.loads((tmp_path / "timing.json").read_text())
     assert saved == json.loads(json.dumps(timing))
     assert set(saved["fixture_samples"]) == {"measured", "processed"}
+    assert saved["picture"] == "moving"
+    assert "video" not in saved
+
+
+@pytest.mark.parametrize("picture", ["static", "moving"])
+def test_picture_is_recorded_and_drives_the_note(picture, tmp_path):
+    clock = FakeClock()
+    timing = _capture(clock, FakeSession(clock), tmp_path / "out", picture=picture, dauer=1)
+    assert timing["picture"] == picture
+    assert timing["note"] == cf.timing_note(picture)
+    assert f"{picture} picture" in timing["note"]
+    assert "video" not in timing["note"]
+
+
+def test_unknown_picture_is_rejected(tmp_path):
+    clock = FakeClock()
+    with pytest.raises(ValueError):
+        _capture(clock, FakeSession(clock), tmp_path / "out", picture="video")
+
+
+def test_bild_is_required():
+    with pytest.raises(SystemExit):
+        cf.parse_args([])
+    with pytest.raises(SystemExit):
+        cf.parse_args(["--bild", "video"])
+    assert cf.parse_args(["--bild", "static"]).bild == "static"
+
+
+@pytest.mark.parametrize("intruder", ["subdir", "README.md"])
+def test_refuses_output_dir_with_other_content(intruder, tmp_path):
+    out = tmp_path / "fixtures"
+    out.mkdir()
+    (out / "measured_3side.json").write_text("{}")
+    if intruder == "subdir":
+        (out / "55pus7373").mkdir()
+    else:
+        (out / intruder).write_text("x")
+    clock = FakeClock()
+    session = FakeSession(clock)
+    with pytest.raises(cf.CaptureError, match="replaced as a whole"):
+        _capture(clock, session, out)
+    assert session.calls == []  # stopped before contacting the TV
+    assert sorted(p.name for p in out.iterdir()) == sorted(["measured_3side.json", intruder if intruder != "subdir" else "55pus7373"])
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["fixtures"]
+
+
+def test_failed_replace_restores_old_output(monkeypatch, tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "keep.json").write_text('{"old": true}')
+    real_replace = cf.os.replace
+    calls = []
+
+    def flaky_replace(src, dst):
+        calls.append((Path(src).name, Path(dst).name))
+        if len(calls) == 2:  # moving the new capture into place
+            raise OSError("disk full")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(cf.os, "replace", flaky_replace)
+    clock = FakeClock()
+    with pytest.raises(OSError, match="disk full"):
+        _capture(clock, FakeSession(clock), out, dauer=1)
+    assert sorted(p.name for p in out.iterdir()) == ["keep.json"]
+    assert json.loads((out / "keep.json").read_text()) == {"old": True}
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["out"]
 
 
 def test_main_needs_environment(monkeypatch, tmp_path, capsys):
     for var in ("HALO_TV_HOST", "HALO_TV_USER", "HALO_TV_PASS"):
         monkeypatch.delenv(var, raising=False)
-    assert cf.main(["--out", str(tmp_path)], session_factory=lambda u, p: pytest.fail("no session")) == 2
+    assert cf.main(["--bild", "static", "--out", str(tmp_path)], session_factory=lambda u, p: pytest.fail("no session")) == 2
     assert "HALO_TV_HOST" in capsys.readouterr().err
 
 
 def test_main_rejects_fast_polling():
     with pytest.raises(SystemExit):
-        cf.parse_args(["--hz", "20"])
+        cf.parse_args(["--bild", "static", "--hz", "20"])
 
 
 def _run_main(monkeypatch, out, argv=(), **session_kw):
@@ -283,7 +350,7 @@ def _run_main(monkeypatch, out, argv=(), **session_kw):
         return real_capture(session, base_url, clock=clock, sleep=clock.sleep)
 
     monkeypatch.setattr(cf, "Capture", fake_capture)
-    code = cf.main(["--out", str(out), "--dauer", "1", *argv], session_factory=factory)
+    code = cf.main(["--bild", "moving", "--out", str(out), "--dauer", "1", *argv], session_factory=factory)
     return code, sessions
 
 

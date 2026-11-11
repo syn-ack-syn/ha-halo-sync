@@ -21,6 +21,9 @@ from halo_sync.zones import SIDES, ZoneSampler, ring_colors, ring_sizes  # noqa:
 
 MODES = ("smooth", "nearest", "some", "side", "native")
 POSITIONS = [(-1.0, 0.0), (0.0, 1.0), (1.0, 0.0), (0.0, -1.0), (-1.0, -1.0), (1.0, 1.0), (0.0, 0.0)]
+# The first recording (2026-11-11) was made with a static picture: measured_00..19 and
+# processed_00..19 are byte-identical within each endpoint. They still cover parsing and every
+# zone mode; they stay until the next recording with a moving picture replaces them.
 SAMPLES = sorted(DIR.glob("measured_*.json")) + sorted(DIR.glob("processed_*.json"))
 IP_RE = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
 MAC_RE = re.compile(r"\b[0-9a-f]{2}([:-])[0-9a-f]{2}(?:\1[0-9a-f]{2}){4}\b", re.IGNORECASE)
@@ -85,12 +88,25 @@ def test_every_mode_runs_on_every_sample(mode):
 
 def test_timing_has_both_endpoints():
     timing = _load(DIR / "timing.json")
-    for part in ("fixture_samples", "video"):
+    assert timing["picture"] in ("static", "moving")
+    for part in ("fixture_samples", "timing_run"):
         assert set(timing[part]) == {"measured", "processed"}
-    for ep, v in timing["video"].items():
+    for ep, v in timing["timing_run"].items():
         assert v["response_ms"] is not None, f"{ep}: no successful answer"
         assert {"min", "median", "p95", "max"} <= set(v["response_ms"])
         assert len(v["changes_per_second"]) == len(v["answers_per_second"])
+
+
+def test_static_capture_has_moving_reference():
+    """A static picture says nothing about the update rate, so a moving-picture run must be on record."""
+    timing = _load(DIR / "timing.json")
+    if timing["picture"] != "static":
+        pytest.skip("timing run was made with a moving picture")
+    ref = timing["moving_reference"]
+    assert ref["picture"] == "moving"
+    for ep in ("measured", "processed"):
+        assert 0 < ref[ep]["changes"] <= ref[ep]["requests"]
+        assert {"median", "p95"} <= set(ref[ep]["response_ms"])
 
 
 def test_no_personal_data_in_fixtures():
