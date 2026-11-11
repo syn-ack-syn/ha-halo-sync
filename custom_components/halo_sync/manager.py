@@ -238,7 +238,9 @@ class Manager:
                 if self.resume.stream_started():
                     self._save()
             else:
-                self.hass.async_create_task(self._stop_extra())
+                # Decide here, with the reason fixed when the stream ended: the Hue lights did the same.
+                off = ends_with_lights_off(self.streamer.end_reason, self.lights_off_with_tv)
+                self.hass.async_create_task(self._stop_extra(lights_off=off))
                 if not self._unloading and self.resume.stream_ended(self.streamer.stop_reason):
                     self._save()
                     # The reader may have reported "ok" before this callback; that change would be lost.
@@ -455,7 +457,7 @@ class Manager:
 
         self.hass.async_create_task(_restart())
 
-    async def _stop_extra(self) -> None:
+    async def _stop_extra(self, lights_off: bool = False) -> None:
         if self._extra_task:
             self._extra_task.cancel()
             self._extra_task = None
@@ -465,7 +467,7 @@ class Manager:
         self._extra_calls.clear()
         async with self._extra_lock:
             await asyncio.sleep(0.1)  # let calls already sent to the lights settle
-            await self._restore_extra()
+            await self._restore_extra(lights_off)
 
     async def _drive_extra(self, lights: list[dict]) -> None:
         entity_ids = [light["entity_id"] for light in lights]
@@ -512,10 +514,10 @@ class Manager:
                 call.add_done_callback(self._extra_calls.discard)
             await asyncio.sleep(0.05)
 
-    async def _restore_extra(self) -> None:
+    async def _restore_extra(self, lights_off: bool = False) -> None:
         if self._snapshot:
             self._snapshot = False
-            if ends_with_lights_off(self.streamer.stop_reason, self.lights_off_with_tv):
+            if lights_off:
                 await self.hass.services.async_call(
                     "light", "turn_off", {"entity_id": self._extra_ids, "transition": 0.8}, blocking=True
                 )

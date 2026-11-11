@@ -365,6 +365,8 @@ class Streamer:
         self.error: str | None = None
         # Why the last stream ended: "user", "tv_standby", "tv_off", "error"; start() resets it to None.
         self.stop_reason: str | None = None
+        # Why the last stream ended, fixed when it ended; stop_reason may change right after.
+        self.end_reason: str | None = None
         # Turn the Hue lights off instead of restoring them when the TV ends the stream; set by the manager.
         self.lights_off_with_tv: bool = False
         self.stats: dict = {}
@@ -484,6 +486,7 @@ class Streamer:
             # the change callback below would overwrite it with "user".
             with self._lock:
                 reason = self.stop_reason
+            self.end_reason = reason
             self.reader.fast = False
             self._stop.set()
             try:
