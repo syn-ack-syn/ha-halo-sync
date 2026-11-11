@@ -14,6 +14,7 @@ from homeassistant.helpers.storage import Store
 
 from .const import (
     CHANNEL_REFRESH_S,
+    CONF_TV_ENDPOINT,
     DARK_CONTENT_LEVELS,
     DEFAULT_ACTIVE,
     DEFAULT_PRESETS,
@@ -30,6 +31,7 @@ from .const import (
     TV_MENU_SATURATION,
     TV_MENU_STYLE,
     TV_MENU_VIDEO_STYLE,
+    TV_ENDPOINT,
     TV_STYLE_DEFAULT,
     TV_STYLE_POLL_S,
     TV_VIDEO_STYLES,
@@ -40,6 +42,7 @@ from .const import (
 _ADDED_IN = {"tv_style": 2, "native": 3}
 from . import nettest
 from .streamer import Streamer
+from .tv_reader import TvReader
 
 _LOGGER = logging.getLogger(__name__)
 STORE_VERSION = 1
@@ -114,7 +117,14 @@ class Manager:
         self.active = DEFAULT_ACTIVE
         # Live values of the active preset, read by the streamer thread; "tv" = emulated TV style.
         self.settings: dict = {"tv": dict(TV_STYLE_DEFAULT)}
-        self.streamer = Streamer(dict(entry.data), self.settings, self._notify_threadsafe)
+        # The only connection to the TV: stream, color sensor and TV style all read from it.
+        d = entry.data
+        self.reader = TvReader(
+            d["tv_host"], d["tv_user"], d["tv_pass"],
+            endpoint=entry.options.get(CONF_TV_ENDPOINT, TV_ENDPOINT),
+            on_change=self._notify_reader_threadsafe,
+        )
+        self.streamer = Streamer(dict(entry.data), self.settings, self._notify_threadsafe, reader=self.reader)
         self.adb = None
         self.hue_channels: list[dict] = []
         self._extra_task: asyncio.Task | None = None
@@ -167,6 +177,9 @@ class Manager:
 
     def _notify_threadsafe(self) -> None:
         self.hass.loop.call_soon_threadsafe(self._on_streamer_change)
+
+    def _notify_reader_threadsafe(self) -> None:
+        self.hass.loop.call_soon_threadsafe(self.notify)
 
     @callback
     def _on_streamer_change(self) -> None:
@@ -272,21 +285,7 @@ class Manager:
 
     # ---- TV Ambilight style (read from the TV settings menu) -----------
     async def _tv_style_loop(self) -> None:
-        import requests
-        from requests.auth import HTTPDigestAuth
-
-        session = requests.Session()
-        session.auth = HTTPDigestAuth(self.entry.data["tv_user"], self.entry.data["tv_pass"])
-        session.verify = False
-        url = f"https://{self.entry.data['tv_host']}:1926/6/menuitems/settings/current"
-        nodes = [TV_MENU_STYLE, TV_MENU_VIDEO_STYLE, TV_MENU_BRIGHTNESS, TV_MENU_SATURATION]
-
-        def fetch() -> dict | None:
-            try:
-                values = session.post(url, json={"nodes": [{"nodeid": n} for n in nodes]}, timeout=3).json()["values"]
-            except (requests.RequestException, ValueError, KeyError):
-                return None
-            data = {v["value"]["Nodeid"]: v["value"].get("data") or {} for v in values}
+        def style_from_menu(data: dict) -> dict:
             category = TV_MENU_CATEGORIES.get(data.get(TV_MENU_STYLE, {}).get("activenode_id"), "video")
             style = data.get(TV_MENU_VIDEO_STYLE, {}).get("selected_item", 1)
             # Follow audio cannot be mirrored (no audio data), so it falls back to Standard on video.
@@ -302,38 +301,41 @@ class Manager:
             }
 
         while True:
-            if self.settings.get("source") == "tv_style":
-                tv = await self.hass.async_add_executor_job(fetch)
-                if tv and tv != self.settings.get("tv"):
+            # The reader polls the TV settings menu only while a TV-style preset is active.
+            self.reader.style_wanted = self.settings.get("source") == "tv_style"
+            data = self.reader.menu_settings if self.reader.style_wanted else None
+            if data is not None:
+                tv = style_from_menu(data)
+                if tv != self.settings.get("tv"):
                     self.settings["tv"] = tv
                     self.notify()
             await asyncio.sleep(TV_STYLE_POLL_S)
 
     # ---- average screen color (for dashboards) -------------------------
     def start_color_poll(self) -> None:
+        self.reader.start()
+        self.entry.async_on_unload(self._async_stop_reader)
         self.entry.async_create_background_task(self.hass, self._color_loop(), f"{DOMAIN}_tv_color")
         self.entry.async_create_background_task(self.hass, self._tv_style_loop(), f"{DOMAIN}_tv_style")
         self.entry.async_create_background_task(self.hass, self._channel_refresh_loop(), f"{DOMAIN}_channels")
 
-    async def _color_loop(self) -> None:
-        import requests
-        from requests.auth import HTTPDigestAuth
+    async def _async_stop_reader(self) -> None:
+        await self.hass.async_add_executor_job(self.reader.stop)
 
-        session = requests.Session()
-        session.auth = HTTPDigestAuth(self.entry.data["tv_user"], self.entry.data["tv_pass"])
-        session.verify = False
-        url = f"https://{self.entry.data['tv_host']}:1926/6/ambilight/measured"
-
-        def fetch() -> tuple[int, int, int] | None:
-            try:
-                layer = session.get(url, timeout=2).json()["layer1"]
-            except (requests.RequestException, ValueError, KeyError):
-                return None
+    def _average_color(self) -> tuple[int, int, int] | None:
+        layer = self.reader.latest_measured
+        if self.reader.state != "ok" or not layer:
+            return None
+        try:
             px = [c for side in layer.values() for c in side.values()]
-            return tuple(round(sum(c[k] for c in px) / len(px)) for k in ("r", "g", "b"))
+            return tuple(round(sum(c[k] for c in px) / len(px)) for k in ("r", "g", "b")) if px else None
+        except (AttributeError, KeyError, TypeError):
+            return None
 
+    async def _color_loop(self) -> None:
+        # The sensor itself limits how often its state changes (sensor.py).
         while True:
-            color = await self.hass.async_add_executor_job(fetch)
+            color = self._average_color()
             if color != self.tv_color:
                 self.tv_color = color
                 self.notify()

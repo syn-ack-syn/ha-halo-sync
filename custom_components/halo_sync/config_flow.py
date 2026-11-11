@@ -73,7 +73,7 @@ class AmbiHueConfigFlow(ConfigFlow, domain=DOMAIN):
                 elif not hue:
                     errors["base"] = "no_bridge"
                 else:
-                    self._data.update({CONF_TV_HOST: tv, CONF_HUE_HOST: hue, CONF_ADB: user_input.get(CONF_ADB, True)})
+                    self._data.update({CONF_TV_HOST: tv, CONF_HUE_HOST: hue, CONF_ADB: user_input.get(CONF_ADB, False)})
                     try:
                         self._pairing = await self.hass.async_add_executor_job(api.tv_pair_request, tv)
                     except (api.ApiError, requests.RequestException) as exc:
@@ -106,7 +106,7 @@ class AmbiHueConfigFlow(ConfigFlow, domain=DOMAIN):
                     vol.Optional(CONF_TV_HOST, default=self._last.get(CONF_TV_HOST, "")): str,
                     vol.Required(CONF_HUE_CHOICE, default=default(ok_bridges, CONF_HUE_CHOICE)): selector(ok_bridges, discovery.bridge_label),
                     vol.Optional(CONF_HUE_HOST, default=self._last.get(CONF_HUE_HOST, "")): str,
-                    vol.Required(CONF_ADB, default=self._last.get(CONF_ADB, True)): bool,
+                    vol.Required(CONF_ADB, default=self._last.get(CONF_ADB, False)): bool,
                     vol.Optional(CONF_RESCAN, default=False): bool,
                 }
             ),
