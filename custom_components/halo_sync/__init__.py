@@ -58,7 +58,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             hass,
             webcomponent_name="halo-sync-panel",
             frontend_url_path=PANEL_URL,
-            module_url=f"{STATIC_URL}/panel.js?v=18",
+            module_url=f"{STATIC_URL}/panel.js?v=19",
             sidebar_title="Halo Sync",
             sidebar_icon="mdi:television-ambient-light",
             require_admin=True,
@@ -69,7 +69,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     mgr: Manager = entry.runtime_data
-    await mgr.async_stop()
+    await mgr.async_shutdown()
     if mgr.adb:
         await mgr.adb.stop()
     if not [e for e in hass.config_entries.async_loaded_entries(DOMAIN) if e.entry_id != entry.entry_id]:

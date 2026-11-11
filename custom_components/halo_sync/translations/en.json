@@ -53,6 +53,9 @@
     "switch": {
       "stream": {
         "name": "Stream"
+      },
+      "auto_resume": {
+        "name": "Auto resume"
       }
     },
     "select": {
