@@ -221,7 +221,9 @@ class DTLSClient:
         self.msg_seq += 1
         return msg
 
-    def _exchange(self, send_flight: Callable[[], None], on_record: Callable[[int, bytes, int, bytes, bytes], bool]) -> None:
+    def _exchange(
+        self, send_flight: Callable[[], None], on_record: Callable[[int, bytes, int, bytes, bytes], bool]
+    ) -> None:
         """Send a flight and feed the answers to `on_record` until it returns True.
 
         The flight is retransmitted after RETRANSMIT_S, then after twice that, and so on, up to
@@ -338,7 +340,7 @@ class DTLSClient:
         # Flight 6: the server's ChangeCipherSpec, then its Finished in epoch 1. Epoch 1 records that
         # arrive before the CCS (reordered or CCS lost) are kept, a few at most, and only looked at
         # once the CCS is there; without a CCS the handshake never completes (it times out).
-        ccs = {"seen": False, "undecryptable": 0}
+        ccs = {"seen": False, "undecryptable": 0, "decrypted": 0}
         early: list[tuple[int, bytes, bytes]] = []
 
         def on_epoch1(ctype: int, seqnum: bytes, frag: bytes) -> bool:
@@ -347,6 +349,7 @@ class DTLSClient:
             except DTLSError:
                 ccs["undecryptable"] += 1
                 return False  # RFC 6347 4.1.2.1: invalid records are dropped silently
+            ccs["decrypted"] += 1
             if ctype == CT_ALERT:
                 raise _parse_alert(plain, authenticated=True)
             if ctype != CT_HANDSHAKE:
@@ -382,8 +385,8 @@ class DTLSClient:
         try:
             self._exchange(send_final, on_final)
         except DTLSTimeout:
-            if ccs["undecryptable"]:
-                # The bridge answered, but not with our keys: the PSK does not match.
+            if ccs["undecryptable"] >= 2 and not ccs["decrypted"]:
+                # The bridge answered repeatedly, never with our keys: the PSK does not match.
                 raise DTLSError("bridge's Finished could not be decrypted (wrong client key?)") from None
             raise
         self.sock.settimeout(None)
@@ -399,9 +402,10 @@ class DTLSClient:
     def _drain(self) -> None:
         """Read whatever the bridge sent since the last call, without blocking.
 
-        At most DRAIN_MAX datagrams per call. Hue sends nothing during a stream except alerts (close_notify when it ends the session, a
-        fatal alert on errors); those raise DTLSAlert. Records that do not decrypt, carry another
-        version or epoch, or do not parse are dropped silently (RFC 6347 4.1.2.1).
+        At most DRAIN_MAX datagrams per call. Hue sends nothing during a stream except alerts
+        (close_notify when it ends the session, a fatal alert on errors); those raise DTLSAlert.
+        Records that do not decrypt, carry another version or epoch, or do not parse are dropped
+        silently (RFC 6347 4.1.2.1).
         """
         key, iv = self.read
         for _ in range(DRAIN_MAX):

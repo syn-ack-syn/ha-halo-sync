@@ -221,7 +221,8 @@ class FakeBridge:
     `junk_epoch1` sends an undecryptable epoch 1 record between CCS and Finished, `hello_version` /
     `fin_version` / `hvr_version` change the record version of the server flight / the Finished record / the HelloVerifyRequest,
     `close_notify_after` sends an encrypted close_notify after that many application records,
-    `junk_after_app` answers application data with an undecryptable record, `junk_datagram`
+    `junk_once` answers the final flight once with CCS and an undecryptable record, then stays
+    silent, `junk_after_app` answers application data with an undecryptable record, `junk_datagram`
     sends a cut datagram before the first answer, `late_hvr` sends a HelloVerifyRequest (fe ff)
     just before CCS + Finished. The HelloVerifyRequest
     goes out with the DTLS 1.0 record version, as RFC 6347 allows. A ClientHello from a new port
@@ -325,6 +326,8 @@ class FakeBridge:
                 self.master = ref_keys(self.psk, cr, self.sr)[0]
                 self.keys = {"ck": ck, "sk": sk, "civ": civ, "siv": siv}
         elif epoch == 1 and ctype == 22:
+            if o.get("silent_finals"):
+                return
             if self.final is not None:  # the client repeated its final flight: our answer was lost
                 self.finals += 1
                 self._send(self.final if not o.get("lose_first_ccs") else self._plain(20, b"\x01") + self.final)
@@ -354,6 +357,10 @@ class FakeBridge:
             ccs = self._plain(20, b"\x01")
             junk = _rec(22, b"\x00" * 40, 1, 99) if o.get("junk_epoch1") else b""
             self.sessions += 1
+            if o.get("junk_once"):
+                self._send(ccs + _rec(22, b"\x00" * 40, 1, 99))
+                o["silent_finals"] = True
+                return
             if o.get("skip_ccs"):
                 self.final = fin_rec
             elif o.get("lose_first_ccs"):
@@ -492,6 +499,11 @@ def test_bridge_without_the_key_is_rejected(bridge):
     b = bridge(psk=b"\xee" * 16, lenient=True)
     with pytest.raises(DTLSError, match="client key"):
         _connect(b)
+
+
+def test_one_undecryptable_record_is_not_blamed_on_the_key(bridge):
+    with pytest.raises(DTLSError, match="handshake timeout"):
+        _connect(bridge(junk_once=True))
 
 
 def test_tampered_server_finished_is_rejected(bridge):
