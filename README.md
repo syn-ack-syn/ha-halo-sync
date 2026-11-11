@@ -58,7 +58,7 @@ Tuning sliders and the light positions on a 16:9 screen:
   [Philips TV integration docs](https://www.home-assistant.io/integrations/philips_js/)), I have not verified that the Ambilight measurement
   endpoint exists there, and the optional ADB source sensor only applies to Android. The same goes for older non-Android Philips TVs.
   If the TV does not answer on port 1926 the first setup step fails with "Could not reach the TV or start pairing". Reports from TitanOS
-  owners are welcome as [issues](https://github.com/MadDinu93/ambilight-tv-hue-sync/issues).
+  owners are welcome as [issues](https://github.com/syn-ack-syn/ha-halo-sync/issues).
 - TVs without Ambilight are **not supported** (they have no Ambilight measurement to read).
 - A **Hue Bridge (v2)** with an **Entertainment area** that contains the lights you want to stream to.
 - Home Assistant **2025.1** or newer (developed and tested on 2026.10; older versions are untested).
@@ -205,7 +205,7 @@ REST-based approaches queue up with several lights. The bridge-to-light radio ho
 
 GNU General Public License v3.0, see [LICENSE](LICENSE).
 
-Copyright (C) 2026 MadDinu93. This program is free software: you can redistribute it and/or modify it under the terms of
+Copyright (C) 2026 MadDinu93. Modifications Copyright (C) 2026 syn-ack-syn (see [NOTICE.md](NOTICE.md)). This program is free software: you can redistribute it and/or modify it under the terms of
 the GNU General Public License as published by the Free Software Foundation, version 3. It is distributed in the hope that
 it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
 PARTICULAR PURPOSE. See the GNU General Public License for more details.
