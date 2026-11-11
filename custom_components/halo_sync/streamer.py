@@ -37,6 +37,10 @@ KEY_SUSPECT_MAX_S = 300.0  # backoff cap while plain key alerts suggest the brid
 KEY_SUSPECT_ERROR = "bridge rejects the client key?"
 
 
+class TvGone(RuntimeError):
+    """The TV stopped answering altogether (switched off completely); ends the stream as "tv_off"."""
+
+
 def next_reconnect_pause(pause: float, cap: float | None = None) -> float:
     """Pause before the next reconnect attempt after one failed: 1, 2, 4, ... capped at 30 s (or `cap`)."""
     return min(pause * 2, RECONNECT_MAX_S if cap is None else cap)
@@ -345,6 +349,8 @@ class Streamer:
         self._thread: threading.Thread | None = None
         self.running = False
         self.error: str | None = None
+        # Why the last stream ended: "user", "tv_standby", "tv_off", "error"; start() resets it to None.
+        self.stop_reason: str | None = None
         self.stats: dict = {}
         self.link = "connected"  # DTLS session to the bridge: "connected" or "reconnecting"
 
@@ -372,11 +378,13 @@ class Streamer:
                 return
             self._stop.clear()
             self.running, self.error, self.stats, self.link = True, None, {}, "connected"
+            self.stop_reason = None
             self._thread = threading.Thread(target=self._run, name="halo_sync", daemon=True)
             self._thread.start()
         self._on_change()
 
     def stop(self, wait: bool = False) -> None:
+        self.stop_reason = "user"  # before the stop event, so a stream ending meanwhile keeps this reason
         self._stop.set()
         thread = self._thread
         if wait and thread and thread is not threading.current_thread():
@@ -451,6 +459,8 @@ class Streamer:
         except Exception as exc:  # noqa: BLE001 - surface any failure on the switch
             _LOGGER.warning("Halo Sync stopped: %s", exc)
             self.error = str(exc)
+            if self.stop_reason is None:
+                self.stop_reason = "tv_off" if isinstance(exc, TvGone) else "error"
         finally:
             self.reader.fast = False
             self._stop.set()
@@ -629,6 +639,8 @@ class Streamer:
                     if mono - standby_since > TV_GIVEUP_S:
                         _LOGGER.info("Halo Sync stopped: the TV is in standby")
                         self.error = "TV in standby"
+                        if self.stop_reason is None:
+                            self.stop_reason = "tv_standby"
                         return  # _run stops the entertainment area and restores the lights
                 else:
                     standby_since = None
@@ -636,7 +648,7 @@ class Streamer:
                     # are only checked outside it. A TV that is switched off completely does not
                     # answer at all: the reader is unreachable and this ends the stream with an error.
                     if mono - max(tv.latest_at or 0.0, mono_start) > TV_GIVEUP_S:
-                        raise RuntimeError("TV stopped answering")
+                        raise TvGone("TV stopped answering")
                 sample_new_frame(mono)
                 p = active_params(self.settings)
                 tau_c = max(p["smoothing_color"], 1) / 1000

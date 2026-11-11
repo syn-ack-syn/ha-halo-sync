@@ -108,7 +108,22 @@ def test_standby_ends_the_stream_cleanly(make_streamer):
     s = make_streamer(reader)
     assert _run(s, GIVEUP_S * 5)
     assert s.error == "TV in standby"
+    assert s.stop_reason == "tv_standby"
     assert not s.running
+
+
+def test_stop_during_standby_counts_as_user(make_streamer):
+    reader = _FakeReader(uniform_layer(SIZES, (0, 0, 0)), state="standby")
+    s = make_streamer(reader)
+    s.running = True
+    t = threading.Thread(target=s._run, daemon=True)
+    t.start()
+    time.sleep(GIVEUP_S / 3)  # in standby, but not long enough to give up
+    s.stop()
+    t.join(5)
+    assert not t.is_alive()
+    assert s.stop_reason == "user"
+    assert s.error is None and not s.running
 
 
 def test_black_frames_keep_the_stream_running(make_streamer):
@@ -125,6 +140,7 @@ def test_silent_tv_ends_the_stream_with_an_error(make_streamer):
     s = make_streamer(reader)
     assert _run(s, GIVEUP_S * 5)
     assert s.error == "TV stopped answering"
+    assert s.stop_reason == "tv_off"
 
 
 def test_snapshot_failure_hands_the_rate_back(make_streamer):
