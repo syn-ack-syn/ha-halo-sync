@@ -1,0 +1,168 @@
+{
+  "captured": "2026-11-11",
+  "fixture_samples": {
+    "measured": {
+      "errors": 0,
+      "requests": 20,
+      "response_ms": {
+        "max": 31.2,
+        "median": 26.2,
+        "min": 24.6,
+        "p95": 30.3
+      }
+    },
+    "processed": {
+      "errors": 0,
+      "requests": 20,
+      "response_ms": {
+        "max": 34.5,
+        "median": 27.2,
+        "min": 21.6,
+        "p95": 31.5
+      }
+    }
+  },
+  "moving_reference": {
+    "captured": "2026-11-11",
+    "duration_s": 10,
+    "measured": {
+      "changes": 85,
+      "requests": 94,
+      "response_ms": {
+        "median": 26,
+        "p95": 33
+      }
+    },
+    "note": "Separate run, one session, 10 s per endpoint. The change count hits the polling rate, so the real update rate may be higher. The difference between measured and processed is not a reason to choose either endpoint.",
+    "picture": "moving",
+    "processed": {
+      "changes": 94,
+      "requests": 95,
+      "response_ms": {
+        "median": 26,
+        "p95": 33
+      }
+    },
+    "target_hz": 10
+  },
+  "note": "fixture_samples: 20 requests 100 ms apart. timing_run: sequential runs per endpoint, static picture (Apple TV home screen), so changes_per_second does not show the update rate. moving_reference: separate run with a moving picture.",
+  "picture": "static",
+  "timing_run": {
+    "measured": {
+      "answers_per_second": [
+        9,
+        10,
+        9,
+        10,
+        9,
+        9,
+        9,
+        9,
+        9,
+        10,
+        9,
+        10,
+        9,
+        9,
+        10,
+        9,
+        10,
+        9,
+        9,
+        10
+      ],
+      "changes_per_second": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "changes_per_second_mean": 0.0,
+      "distinct_responses": 1,
+      "duration_s": 20.0,
+      "errors": 0,
+      "requests": 187,
+      "response_ms": {
+        "max": 241.0,
+        "median": 25.9,
+        "min": 21.2,
+        "p95": 32.2
+      },
+      "target_hz": 10.0
+    },
+    "processed": {
+      "answers_per_second": [
+        9,
+        10,
+        9,
+        9,
+        9,
+        10,
+        9,
+        10,
+        9,
+        9,
+        10,
+        9,
+        10,
+        9,
+        10,
+        9,
+        10,
+        9,
+        9,
+        10
+      ],
+      "changes_per_second": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "changes_per_second_mean": 0.0,
+      "distinct_responses": 1,
+      "duration_s": 20.0,
+      "errors": 0,
+      "requests": 188,
+      "response_ms": {
+        "max": 42.0,
+        "median": 25.3,
+        "min": 21.4,
+        "p95": 30.4
+      },
+      "target_hz": 10.0
+    }
+  }
+}
