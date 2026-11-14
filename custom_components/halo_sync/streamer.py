@@ -13,7 +13,7 @@ import requests
 
 from .const import CHROMA_FULL_LEVEL, DARK_CONTENT_LEVELS, DARK_LEVEL, SEND_HZ, TV_GIVEUP_S
 from .dtls import DTLSAlert, DTLSClient, DTLSError
-from .tv_reader import TvReader
+from .tv_reader import AUTH_FAILED, TvReader
 from .zones import ZoneSampler
 
 _LOGGER = logging.getLogger(__name__)
@@ -35,12 +35,35 @@ ALERT_FATAL = 2
 KEY_ALERTS = frozenset({115, 51, 20})
 KEY_SUSPECT_MAX_S = 300.0  # backoff cap while plain key alerts suggest the bridge rejects our key
 KEY_SUSPECT_ERROR = "bridge rejects the client key?"
+# Stable error codes next to the English `error` text, for the panel to translate:
+# tv_standby, tv_gone, tv_auth, hue_key_rejected, unknown. The bridge link has its own code
+# (stats["hue_link_error_code"]): link_lost.
+LINK_STATS = ("hue_link", "hue_link_error", "hue_link_error_code")
 # Stop reasons after which the "lights off with TV" option turns the lights off instead of restoring them.
 TV_OFF_REASONS = ("tv_standby", "tv_off")
 
 
 class TvGone(RuntimeError):
     """The TV stopped answering altogether (switched off completely); ends the stream as "tv_off"."""
+
+
+class HueKeyRejected(RuntimeError):
+    """The bridge refused our identity or key in an authenticated alert: a new key is needed."""
+
+
+class TvAuthFailed(RuntimeError):
+    """The TV refuses the paired credentials (reader state auth_failed); ends the stream as "error"."""
+
+
+def error_code_for(exc: BaseException) -> str:
+    """The error code for an exception that ended the stream."""
+    if isinstance(exc, TvGone):
+        return "tv_gone"
+    if isinstance(exc, TvAuthFailed):
+        return "tv_auth"
+    if isinstance(exc, HueKeyRejected) or rejects_our_key(exc):
+        return "hue_key_rejected"
+    return "unknown"
 
 
 def next_reconnect_pause(pause: float, cap: float | None = None) -> float:
@@ -363,6 +386,7 @@ class Streamer:
         self._thread: threading.Thread | None = None
         self.running = False
         self.error: str | None = None
+        self.error_code: str | None = None  # set and cleared together with `error`, see error_code_for()
         # Why the last stream ended: "user", "tv_standby", "tv_off", "error"; start() resets it to None.
         self.stop_reason: str | None = None
         # Why the last stream ended, fixed when it ended; stop_reason may change right after.
@@ -396,6 +420,7 @@ class Streamer:
                 return
             self._stop.clear()
             self.running, self.error, self.stats, self.link = True, None, {}, "connected"
+            self.error_code = None
             self.stop_reason = None
             self._thread = threading.Thread(target=self._run, name="halo_sync", daemon=True)
             self._thread.start()
@@ -477,7 +502,7 @@ class Streamer:
             self._stream()
         except Exception as exc:  # noqa: BLE001 - surface any failure on the switch
             _LOGGER.warning("Halo Sync stopped: %s", exc)
-            self.error = str(exc)
+            self.error, self.error_code = str(exc), error_code_for(exc)
             with self._lock:
                 if self.stop_reason is None:
                     self.stop_reason = "tv_off" if isinstance(exc, TvGone) else "error"
@@ -527,11 +552,12 @@ class Streamer:
     def _set_link(self, link: str, reason: str | None = None) -> None:
         """Report the bridge connection state through on_change (and the stats the entities show)."""
         self.link = link
-        stats = {k: v for k, v in self.stats.items() if k not in ("hue_link", "hue_link_error")}
+        stats = {k: v for k, v in self.stats.items() if k not in LINK_STATS}
         if link != "connected":
             stats["hue_link"] = link
             if reason:
                 stats["hue_link_error"] = reason
+                stats["hue_link_error_code"] = "link_lost"
         self.stats = stats
         self._on_change()
 
@@ -628,13 +654,13 @@ class Streamer:
                     except (DTLSError, OSError, RuntimeError) as exc:
                         if rejects_our_key(exc):
                             # Authenticated: the bridge refuses our identity or key, retrying cannot help.
-                            raise RuntimeError(f"bridge rejected the reconnect: {exc}") from exc
+                            raise HueKeyRejected(f"bridge rejected the reconnect: {exc}") from exc
                         code = key_alert(exc)
                         if code is not None and code == last_key_alert and not key_suspect:
                             # Twice the same plain key alert: likely a wrong key, but it could be
                             # forged, so show it and keep trying slowly instead of giving up.
                             key_suspect = True
-                            self.error = KEY_SUSPECT_ERROR
+                            self.error, self.error_code = KEY_SUSPECT_ERROR, "hue_key_rejected"
                         last_key_alert = code
                         pause = next_reconnect_pause(pause, KEY_SUSPECT_MAX_S if key_suspect else None)
                         retry_at = time.monotonic() + pause
@@ -645,7 +671,7 @@ class Streamer:
                         if key_suspect:
                             key_suspect = False
                             if self.error == KEY_SUSPECT_ERROR:
-                                self.error = None
+                                self.error, self.error_code = None, None
                         inactive_link_at = time.monotonic() if dropped_inactive else None
                         monitor = new_monitor()
                         _LOGGER.info("Halo Sync reconnected to the bridge")
@@ -665,7 +691,7 @@ class Streamer:
                     standby_since = mono if standby_since is None else standby_since
                     if mono - standby_since > TV_GIVEUP_S:
                         _LOGGER.info("Halo Sync stopped: the TV is in standby")
-                        self.error = "TV in standby"
+                        self.error, self.error_code = "TV in standby", "tv_standby"
                         with self._lock:
                             if self.stop_reason is None:
                                 self.stop_reason = "tv_standby"
@@ -675,7 +701,10 @@ class Streamer:
                     # In standby (/powerstate is not On) the reader reads no colors, so stale frames
                     # are only checked outside it. A TV that is switched off completely does not
                     # answer at all: the reader is unreachable and this ends the stream with an error.
+                    # A TV that refuses our credentials answers, but delivers no colors either.
                     if mono - max(tv.latest_at or 0.0, mono_start) > TV_GIVEUP_S:
+                        if tv.state == AUTH_FAILED:
+                            raise TvAuthFailed("TV rejected the pairing credentials")
                         raise TvGone("TV stopped answering")
                 sample_new_frame(mono)
                 p = active_params(self.settings)
@@ -726,7 +755,7 @@ class Streamer:
                 if now - last_stats > 10 and tv.read_count > reads_at_stats:
                     v = sorted(tv.read_times_ms())
                     n = tv.read_count - reads_at_stats
-                    link = {k: v for k, v in self.stats.items() if k in ("hue_link", "hue_link_error")}
+                    link = {k: v for k, v in self.stats.items() if k in LINK_STATS}
                     self.stats = {"tv_reads_per_s": round(n / (now - last_stats), 1), "tv_read_median_ms": round(v[len(v) // 2]) if v else None, **link}
                     reads_at_stats = tv.read_count
                     last_stats = now

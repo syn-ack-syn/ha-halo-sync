@@ -108,6 +108,7 @@ def test_standby_ends_the_stream_cleanly(make_streamer):
     s = make_streamer(reader)
     assert _run(s, GIVEUP_S * 5)
     assert s.error == "TV in standby"
+    assert s.error_code == "tv_standby"
     assert s.stop_reason == "tv_standby"
     assert not s.running
 
@@ -137,6 +138,7 @@ def test_stop_during_standby_counts_as_user(make_streamer):
     t.join(GIVEUP_S * 10)  # the stream ends by itself at the standby limit
     assert not t.is_alive()
     assert s.error == "TV in standby"  # the standby branch did run ...
+    assert s.error_code == "tv_standby"
     assert s.stop_reason == "user"  # ... and kept the reason stop() had set
     assert not s.running
 
@@ -145,8 +147,10 @@ def test_start_resets_the_stop_reason(make_streamer):
     s = make_streamer(_FakeReader(uniform_layer(SIZES, (90, 90, 90))))
     s._run = lambda: None  # no stream thread work; only start()'s bookkeeping is under test
     s.stop_reason = "tv_standby"
+    s.error, s.error_code = "TV in standby", "tv_standby"
     s.start()
     assert s.stop_reason is None and s.running
+    assert s.error is None and s.error_code is None
 
 
 @pytest.mark.parametrize("exc", [RuntimeError("bridge refused"), ValueError("bad answer")])
@@ -160,6 +164,7 @@ def test_other_failure_in_the_stream_is_an_error(make_streamer, exc):
     s._stream = broken
     assert _run(s, 2)
     assert s.error == str(exc)
+    assert s.error_code == "unknown"
     assert s.stop_reason == "error"
     assert not s.running
 
@@ -168,7 +173,7 @@ def test_black_frames_keep_the_stream_running(make_streamer):
     reader = _FakeReader(uniform_layer(SIZES, (0, 0, 0)))  # powerstate On, dark scene
     s = make_streamer(reader)
     assert not _run(s, GIVEUP_S * 3)
-    assert s.error is None
+    assert s.error is None and s.error_code is None
     assert _FakeDTLS.sent > 0
 
 
@@ -178,7 +183,18 @@ def test_silent_tv_ends_the_stream_with_an_error(make_streamer):
     s = make_streamer(reader)
     assert _run(s, GIVEUP_S * 5)
     assert s.error == "TV stopped answering"
+    assert s.error_code == "tv_gone"
     assert s.stop_reason == "tv_off"
+
+
+def test_tv_refusing_the_credentials_ends_the_stream_with_tv_auth(make_streamer):
+    reader = _FakeReader(uniform_layer(SIZES, (90, 90, 90)), state="auth_failed")
+    reader.fresh, reader._stale_at = False, time.monotonic() - 100
+    s = make_streamer(reader)
+    assert _run(s, GIVEUP_S * 5)
+    assert s.error_code == "tv_auth"
+    assert s.error == "TV rejected the pairing credentials"
+    assert s.stop_reason == "error"  # not tv_off: the TV is on, the lights are restored
 
 
 def test_snapshot_failure_hands_the_rate_back(make_streamer):
@@ -193,6 +209,7 @@ def test_snapshot_failure_hands_the_rate_back(make_streamer):
     assert reader.fast is False
     assert reader.woken == 1
     assert s.error == "unexpected bridge answer"
+    assert s.error_code == "unknown"
     assert not s.running
 
 
@@ -278,7 +295,7 @@ def test_broken_link_reconnects_and_keeps_full_rate(make_streamer, scripted):
     assert actions[:5] == ["start", "stop", "start", "stop", "start"]  # area restarted for every attempt
     assert actions[-1] == "stop"  # final stop by _run
     assert "reconnecting" in links and links[links.index("reconnecting"):].count("connected") >= 1
-    assert s.link == "connected" and "hue_link" not in s.stats
+    assert s.link == "connected" and "hue_link" not in s.stats and "hue_link_error_code" not in s.stats
     assert reader.fast_seen and all(reader.fast_seen)  # the reader stayed at full rate while reconnecting
     assert reader.fast is False and reader.woken == 1
     assert s.error is None
@@ -295,6 +312,7 @@ def test_stop_while_reconnecting_restores_the_lights(make_streamer, scripted):
     assert not _run(s, 0.6)
     assert len(_ScriptedDTLS.clients) >= 3  # kept trying while the stream was on
     assert s.stats.get("hue_link") == "reconnecting" and "handshake timeout" in s.stats["hue_link_error"]
+    assert s.stats["hue_link_error_code"] == "link_lost"
     assert actions[-1] == "stop"
     assert restored and restored[0] is snap
     assert not s.running and reader.fast is False
@@ -320,6 +338,7 @@ def test_authenticated_key_alert_on_reconnect_ends_the_stream(make_streamer, scr
     s = make_streamer(reader)
     assert _run(s, 2)  # ended by itself instead of retrying every 30 s
     assert "bridge rejected the reconnect" in s.error
+    assert s.error_code == "hue_key_rejected"
     assert len(_ScriptedDTLS.clients) == 1 + len(alerts)
     assert actions[-1] == "stop" and not s.running and reader.fast is False
 
@@ -365,11 +384,11 @@ def test_forged_plain_key_alerts_show_an_error_but_the_stream_recovers(make_stre
     reader = _FakeReader(uniform_layer(SIZES, (90, 90, 90)))
     s = make_streamer(reader)
     errors: list = []
-    s._on_change = lambda: errors.append(s.error)
+    s._on_change = lambda: errors.append((s.error, s.error_code))
     assert not _run(s, 2.0)  # still on
-    assert streamer_mod.KEY_SUSPECT_ERROR in errors  # shown while it looked like a wrong key
+    assert (streamer_mod.KEY_SUSPECT_ERROR, "hue_key_rejected") in errors  # shown while it looked like a wrong key
     assert caps[:2] == [None, streamer_mod.KEY_SUSPECT_MAX_S]  # the second same alert raises the cap
-    assert s.error is None  # cleared by the successful reconnect
+    assert s.error is None and s.error_code is None  # cleared by the successful reconnect
     assert _ScriptedDTLS.clients[-1].sent > 0 and s.link == "connected"
 
 
