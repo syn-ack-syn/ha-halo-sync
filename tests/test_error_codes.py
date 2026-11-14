@@ -47,6 +47,7 @@ def manager_mod():
         mod = importlib.import_module("halo_sync.manager")
         yield mod
         sys.modules.pop("halo_sync.manager", None)  # nothing else may pick up the stubbed import
+        vars(sys.modules["halo_sync"]).pop("manager", None)  # nor through the package attribute
 
 
 # ---- streamer --------------------------------------------------------------
@@ -199,11 +200,28 @@ def test_refused_tv_credentials_start_one_reauth(mgr):
 def test_stream_ending_with_a_rejected_hue_key_starts_a_reauth(mgr):
     mgr._was_running = True
     mgr.streamer.error_code = "hue_key_rejected"
+    mgr.streamer.end_reason = "error"
     mgr._on_streamer_change()
     assert mgr.entry.reauths == [{**mgr.entry.data, "reauth_target": "hue"}]
     mgr.reader.state = "auth_failed"
     mgr._on_reader_change()
     assert len(mgr.entry.reauths) == 1  # once per entry lifetime
+
+
+def test_manual_stop_during_a_suspected_key_alert_starts_no_reauth(mgr):
+    mgr._was_running = True
+    mgr.streamer.error_code = "hue_key_rejected"  # plain, forgeable alerts while still streaming
+    mgr.streamer.end_reason = "user"
+    mgr._on_streamer_change()
+    assert mgr.entry.reauths == []
+
+
+def test_unchanged_name_saves_even_if_another_preset_shares_it(mgr):
+    mgr.presets["game2"] = {"name": "game"}  # stored before the uniqueness check existed
+    assert mgr.save_preset("game2", {"name": "game", "max_brightness": 50}) == "game2"
+    assert mgr.presets["game2"]["name"] == "game"
+    with pytest.raises(ValueError, match="^duplicate_name$"):
+        mgr.save_preset("movie", {"name": "GAME"})
 
 
 def test_other_stream_ends_start_no_reauth(mgr):

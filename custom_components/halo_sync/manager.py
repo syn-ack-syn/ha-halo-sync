@@ -234,7 +234,7 @@ class Manager:
     @callback
     def _start_reauth(self, target: str) -> None:
         """Ask the user to pair again ("tv" or "hue"); once per entry lifetime."""
-        # Not while unloading: a reload after a finished reauth must not start the next one.
+        # Not while unloading: an error code left over from the ending stream must not start a reauth.
         if self._reauth_started or self._unloading:
             return
         self._reauth_started = True
@@ -277,7 +277,9 @@ class Manager:
                 # Decide here, with the reason fixed when the stream ended: the Hue lights did the same.
                 off = ends_with_lights_off(self.streamer.end_reason, self.lights_off_with_tv)
                 self.hass.async_create_task(self._stop_extra(lights_off=off))
-                if self.streamer.error_code == "hue_key_rejected":
+                # Only a stream that ended on the error: a manual stop during a suspected (plain,
+                # forgeable) key alert leaves the code set but must not ask for a new key.
+                if self.streamer.end_reason == "error" and self.streamer.error_code == "hue_key_rejected":
                     self._start_reauth("hue")
                 if not self._unloading and self.resume.stream_ended(self.streamer.stop_reason):
                     self._save()
@@ -322,7 +324,12 @@ class Manager:
     def save_preset(self, preset_id: str | None, preset: dict) -> str:
         if preset_id is not None and preset_id not in self.presets:
             raise ValueError("unknown_preset")
-        preset = {**preset, "name": check_preset_name(self.presets, preset_id, preset.get("name"))}
+        current = self.presets.get(preset_id, {}).get("name") if preset_id is not None else None
+        if current is not None and str(preset.get("name") or "").strip()[:NAME_MAX].strip() == current.strip():
+            # Unchanged name: stored presets may already share a name from before the check existed.
+            preset = {**preset, "name": current}
+        else:
+            preset = {**preset, "name": check_preset_name(self.presets, preset_id, preset.get("name"))}
         if preset_id is None:
             base = re.sub(r"[^a-z0-9]+", "_", str(preset.get("name", "preset")).lower()).strip("_") or "preset"
             preset_id, n = base, 2

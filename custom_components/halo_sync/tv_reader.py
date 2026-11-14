@@ -43,6 +43,9 @@ _LOGGER = logging.getLogger(__name__)
 State = Literal["ok", "standby", "unreachable", "auth_failed"]
 # The TV answers, but refuses our pairing credentials (HTTP 401/403): reading again cannot help.
 AUTH_FAILED: State = "auth_failed"
+# Refusals in a row before the state is auth_failed: a single 401/403 (e.g. a digest nonce hiccup)
+# would otherwise start a reauth that stays even when the next read works again.
+AUTH_FAILS_NEEDED = 3
 AUTH_STATUS = (401, 403)
 MENU_NODES = (TV_MENU_STYLE, TV_MENU_VIDEO_STYLE, TV_MENU_BRIGHTNESS, TV_MENU_SATURATION)
 
@@ -96,6 +99,7 @@ class TvReader:
         self._menu: dict | None = None
         self._style_wanted = False
         self._backoff = TV_BACKOFF_MIN_S
+        self._auth_fails = 0  # 401/403 answers in a row
         self._power_due = 0.0
         self._style_due = 0.0
         # Full rate while True (set by the stream), TV_IDLE_POLL_HZ otherwise.
@@ -211,10 +215,13 @@ class TvReader:
             self._poll_style(t0)
         except _AuthFailed as exc:
             _LOGGER.debug("TV refused the credentials: %s", exc)
-            return self._fail(AUTH_FAILED)
+            self._auth_fails += 1
+            return self._fail(AUTH_FAILED if self._auth_fails >= AUTH_FAILS_NEEDED else "unreachable")
         except (requests.RequestException, ValueError, KeyError, TypeError, AttributeError) as exc:
             _LOGGER.debug("TV read failed: %s", exc)
+            self._auth_fails = 0
             return self._fail()
+        self._auth_fails = 0
         self._backoff = TV_BACKOFF_MIN_S
         # A completely black frame is a dark scene, not standby: polling goes on at the same rate.
         self._set_state("ok")

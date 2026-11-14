@@ -333,25 +333,44 @@ def test_bad_json_counts_as_failure(reader, session):
     assert reader.state == "unreachable"
 
 
+def _refuse(reader, times):
+    for _ in range(times):
+        reader._power_due = 0.0  # poll the powerstate in every cycle
+        reader._step()
+
+
 @pytest.mark.parametrize("status", [401, 403])
 def test_refused_color_read_is_auth_failed_not_unreachable(reader, session, changes, status):
     session.status = {"/ambilight/measured": status}
     assert reader._step() == 0.5  # same backoff as other failures
+    assert reader.state == "unreachable"  # a single refusal is not enough
+    for _ in range(tv_reader_mod.AUTH_FAILS_NEEDED - 1):
+        reader._step()
     assert reader.state == "auth_failed" == tv_reader_mod.AUTH_FAILED
-    assert changes == ["auth_failed"]  # on_change like any other state
+    assert changes == ["auth_failed"]  # starts unreachable; on_change like any other state
     assert reader.latest_measured is None and reader.read_count == 0
 
 
 def test_refused_powerstate_is_auth_failed(reader, session, changes):
     session.status = {"/powerstate": 401}
-    reader._step()
+    _refuse(reader, tv_reader_mod.AUTH_FAILS_NEEDED)
     assert reader.state == "auth_failed"
     assert session.count("/ambilight/measured") == 0  # stopped before the color read
 
 
+def test_other_failure_resets_the_refusal_count(reader, session):
+    session.status = {"/ambilight/measured": 401}
+    _refuse(reader, tv_reader_mod.AUTH_FAILS_NEEDED - 1)
+    session.status = {"/ambilight/measured": 500}  # body has no layer1: a plain failure
+    reader._step()
+    session.status = {"/ambilight/measured": 401}
+    _refuse(reader, tv_reader_mod.AUTH_FAILS_NEEDED - 1)
+    assert reader.state == "unreachable"
+
+
 def test_auth_failed_recovers_once_the_tv_accepts_again(reader, session, changes):
     session.status = {"/ambilight/measured": 401}
-    reader._step()
+    _refuse(reader, tv_reader_mod.AUTH_FAILS_NEEDED)
     session.status = {}
     reader._step()
     assert reader.state == "ok"
