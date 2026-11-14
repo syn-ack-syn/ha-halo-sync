@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from homeassistant.components.switch import SwitchEntity
+from homeassistant.const import EntityCategory
 
 from .entity import AmbiHueEntity
 
@@ -43,6 +44,7 @@ class StreamSwitch(AmbiHueEntity, SwitchEntity):
 
 class AutoResumeSwitch(AmbiHueEntity, SwitchEntity):
     _attr_icon = "mdi:television-play"
+    _attr_entity_category = EntityCategory.CONFIG
 
     @property
     def is_on(self) -> bool:
@@ -57,6 +59,7 @@ class AutoResumeSwitch(AmbiHueEntity, SwitchEntity):
 
 class LightsOffWithTvSwitch(AmbiHueEntity, SwitchEntity):
     _attr_icon = "mdi:lightbulb-off-outline"
+    _attr_entity_category = EntityCategory.CONFIG
 
     @property
     def is_on(self) -> bool:

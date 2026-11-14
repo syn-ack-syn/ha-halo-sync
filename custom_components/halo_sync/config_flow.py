@@ -349,6 +349,10 @@ class AmbiHueConfigFlow(ConfigFlow, domain=DOMAIN):
             return await self.async_step_reauth_tv()
         if target == "hue":
             return await self.async_step_reauth_hue_link()
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(self, user_input=None) -> ConfigFlowResult:
+        """No target given: offer both. A menu step needs its own method, Home Assistant checks for it."""
         return self.async_show_menu(step_id="reauth_confirm", menu_options=["reauth_tv", "reauth_hue_link"])
 
     async def async_step_reauth_tv(self, user_input=None) -> ConfigFlowResult:

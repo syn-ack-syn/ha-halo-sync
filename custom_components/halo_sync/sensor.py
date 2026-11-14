@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 
 from homeassistant.components.sensor import SensorEntity
+from homeassistant.const import EntityCategory
 from homeassistant.core import CALLBACK_TYPE, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.event import async_call_later
@@ -35,6 +36,7 @@ class TvColor(AmbiHueEntity, SensorEntity):
     """
 
     _attr_icon = "mdi:palette"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
     _unrecorded_attributes = frozenset({"rgb_color"})
 
     def __init__(self, entry, key: str):
