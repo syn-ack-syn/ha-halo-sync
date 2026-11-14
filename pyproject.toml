@@ -8,12 +8,17 @@ requires-python = ">=3.13"
 dependencies = []
 
 [dependency-groups]
+# The minimums keep dev apart from ha (see conflicts below): uv picks one version for both groups
+# whenever one fits, which would pull the fast suite back to the 2025.1.0 pins.
 dev = [
-    "pytest>=8.3",
-    "cryptography>=43",
-    "requests>=2.32",
+    "pytest>=9",
+    "cryptography>=50",
+    "requests>=2.34",
+    "urllib3>=2",
 ]
-# Config flow tests against Home Assistant (tests_ha/): `uv run --group ha pytest tests_ha`.
+# Config flow tests against Home Assistant (tests_ha/), in their own environment so the fast suite
+# keeps its libraries and plugins:
+# `UV_PROJECT_ENVIRONMENT=.venv-ha uv run --no-default-groups --group ha pytest tests_ha`.
 # Pinned to the release that matches the minimum Home Assistant version in hacs.json (2025.1.0).
 ha = [
     "pytest-homeassistant-custom-component==0.13.201",
@@ -27,6 +32,9 @@ ha = [
 
 [tool.uv]
 package = false
+# dev and ha resolve separately: the fast suite keeps current libraries (cryptography, requests,
+# urllib3), the config flow tests get the versions Home Assistant 2025.1.0 pins.
+conflicts = [[{ group = "dev" }, { group = "ha" }]]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

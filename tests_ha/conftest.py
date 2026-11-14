@@ -1,4 +1,4 @@
-"""Setup for the tests against Home Assistant (run: `uv run --group ha pytest tests_ha`).
+"""Setup for the tests against Home Assistant (run: `UV_PROJECT_ENVIRONMENT=.venv-ha uv run --no-default-groups --group ha pytest tests_ha`; never together with tests/ in one run).
 
 Unlike tests/, these tests import the integration as `custom_components.halo_sync` inside a real (test)
 Home Assistant from pytest-homeassistant-custom-component. The HA pytest plugin is switched off in

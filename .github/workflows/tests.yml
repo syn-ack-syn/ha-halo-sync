@@ -25,4 +25,6 @@ jobs:
         with:
           version: "0.11.23"
           python-version: "3.13"
-      - run: uv run --locked --group ha pytest -q tests_ha
+      - run: uv run --locked --no-default-groups --group ha pytest -q tests_ha
+        env:
+          UV_PROJECT_ENVIRONMENT: .venv-ha

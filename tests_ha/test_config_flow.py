@@ -560,6 +560,15 @@ def loaded_manager(hass: HomeAssistant) -> tuple[MockConfigEntry, Manager]:
     return entry, mgr
 
 
+async def test_diagnostics_of_a_real_manager_contain_no_secrets(hass: HomeAssistant, loaded_manager) -> None:
+    entry, _mgr = loaded_manager
+    diag = await async_get_config_entry_diagnostics(hass, entry)
+    dumped = json.dumps(diag)  # must be storable as JSON
+    for secret in SECRETS:
+        assert secret not in dumped
+    assert isinstance(diag["status"], dict) and "presets" in diag["status"]
+
+
 async def test_unload_refused_by_the_platforms_keeps_the_manager_working(hass: HomeAssistant, loaded_manager) -> None:
     entry, mgr = loaded_manager
     seen = []
