@@ -224,7 +224,11 @@ class AmbiHueConfigFlow(ConfigFlow, domain=DOMAIN):
             await self.async_set_unique_id(f"{self._data[CONF_TV_HOST]}_{user_input[CONF_ENT_ID]}")
             self._abort_if_unique_id_configured()
             return self.async_create_entry(title=f"Halo Sync: {self._areas[user_input[CONF_ENT_ID]]}", data=self._data)
-        return self._area_form("area", error=await self._load_areas())
+        error = await self._load_areas()
+        if error == "hue_auth":
+            # Checking again would send the same rejected key; only a new key (link button) helps.
+            return self.async_show_form(step_id="hue_link", data_schema=vol.Schema({}), errors={"base": error})
+        return self._area_form("area", error=error)
 
     # ---- reconfigure: new addresses or area, the unique ID stays ---------------------------------
     # A changed TV address is checked with the stored pairing and paired again if that TV rejects it.

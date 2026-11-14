@@ -66,6 +66,22 @@ def check_preset_name(presets: dict[str, dict], preset_id: str | None, name) -> 
     return cleaned
 
 
+def preset_name_to_save(presets: dict[str, dict], preset_id: str | None, name) -> str:
+    """The name save_preset stores: the stored one when unchanged, else check_preset_name's result.
+
+    Unchanged (after stripping) keeps the stored name even if another preset shares it: stored presets
+    may do so from before the check existed. A stored name that is empty or blank is never "unchanged".
+    """
+    current = presets.get(preset_id, {}).get("name") if preset_id is not None else None
+    if (
+        isinstance(current, str)
+        and current.strip()
+        and str(name or "").strip()[:NAME_MAX].strip() == current.strip()
+    ):
+        return current
+    return check_preset_name(presets, preset_id, name)
+
+
 def _clean_preset(raw: dict, name_fallback: str) -> dict:
     out = {"name": str(raw.get("name") or name_fallback)[:NAME_MAX]}
     # Missing keys (e.g. tunables added later) come from the matching default preset.
@@ -324,12 +340,7 @@ class Manager:
     def save_preset(self, preset_id: str | None, preset: dict) -> str:
         if preset_id is not None and preset_id not in self.presets:
             raise ValueError("unknown_preset")
-        current = self.presets.get(preset_id, {}).get("name") if preset_id is not None else None
-        if current and current.strip() and str(preset.get("name") or "").strip()[:NAME_MAX].strip() == current.strip():
-            # Unchanged name: stored presets may already share a name from before the check existed.
-            preset = {**preset, "name": current}
-        else:
-            preset = {**preset, "name": check_preset_name(self.presets, preset_id, preset.get("name"))}
+        preset = {**preset, "name": preset_name_to_save(self.presets, preset_id, preset.get("name"))}
         if preset_id is None:
             base = re.sub(r"[^a-z0-9]+", "_", str(preset.get("name", "preset")).lower()).strip("_") or "preset"
             preset_id, n = base, 2
@@ -395,6 +406,11 @@ class Manager:
     def begin_unload(self) -> None:
         """Called before the platforms unload: from now on a failing stream or reader starts no reauth."""
         self._unloading = True
+
+    @callback
+    def cancel_unload(self) -> None:
+        """The platforms did not unload, so the entry stays: auto resume, reauth and saving work again."""
+        self._unloading = False
 
     async def _async_on_ha_stop(self, event: Event) -> None:
         await self._async_persist_resume()

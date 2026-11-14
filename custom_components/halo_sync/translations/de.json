@@ -94,7 +94,7 @@
       "no_bridge": "Wähle eine Hue Bridge aus der Liste oder gib ihre IP-Adresse ein.",
       "no_areas": "Die Bridge hat keine Entertainment-Bereiche. Lege in der Hue-App einen an und sende das Formular dann erneut ab.",
       "tv_auth": "Der Fernseher unter dieser Adresse akzeptiert die gespeicherte Kopplung nicht. Sende das Formular ab, um ihn neu zu koppeln.",
-      "hue_auth": "Die Hue Bridge akzeptiert den Schlüssel nicht."
+      "hue_auth": "Die Hue Bridge akzeptiert den Schlüssel nicht. Drücke die Link-Taste auf der Bridge erneut und sende das Formular ab."
     },
     "abort": {
       "already_configured": "Dieser Fernseher und dieser Entertainment-Bereich sind bereits eingerichtet.",

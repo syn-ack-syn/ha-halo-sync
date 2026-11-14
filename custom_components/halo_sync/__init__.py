@@ -86,8 +86,13 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     mgr: Manager = entry.runtime_data
     # Before the platforms go: no reauth may start in the gap until the manager shuts down.
     mgr.begin_unload()
-    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    try:
+        unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    except Exception:  # not CancelledError: that is HA shutting down, where the flag may stay
+        mgr.cancel_unload()  # the entry stays loaded; a set flag would block resume, reauth and saving
+        raise
     if not unload_ok:
+        mgr.cancel_unload()
         return False
     await mgr.async_shutdown()
     if mgr.adb:

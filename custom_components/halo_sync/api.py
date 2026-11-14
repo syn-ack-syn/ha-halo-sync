@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import re
 import secrets
 import string
 import warnings
@@ -54,6 +55,36 @@ def _json(r: requests.Response, what: str):
         raise ApiError(f"{what}: answer is no JSON (HTTP {r.status_code})") from exc
 
 
+_CODE_RE = re.compile(r"[A-Za-z0-9_.-]{1,40}")
+
+
+def _code(value) -> str:
+    """An error code from an answer, fit for a message: a short plain str or int, else a generic text.
+
+    The answer can hold credentials (e.g. an auth_key nested in the error field); those never reach the text.
+    """
+    if isinstance(value, int) and not isinstance(value, bool):
+        value = str(value)
+    if isinstance(value, str) and _CODE_RE.fullmatch(value):
+        return value
+    return "unexpected" if value is not None else "missing"
+
+
+def _digest_request(send, url: str, user: str, password: str, what: str, **kwargs) -> requests.Response:
+    """A request (send: requests.get or requests.post) with HTTP digest auth.
+
+    A malformed auth challenge (e.g. no nonce) is an ApiError: requests raises KeyError and the like
+    while answering such a challenge. Network errors stay requests.RequestException (some of those are
+    ValueErrors too, so they are passed on first).
+    """
+    try:
+        return send(url, auth=HTTPDigestAuth(user, password), **kwargs)
+    except requests.RequestException:
+        raise
+    except (KeyError, ValueError, TypeError, AttributeError, IndexError) as exc:
+        raise ApiError(f"{what}: the TV sent an unusable authentication challenge ({type(exc).__name__})") from exc
+
+
 def _missing(data: dict, *fields: str) -> list[str]:
     """Names of the fields that are absent or not a non-empty string (only names, never values)."""
     return [f for f in fields if not isinstance(data.get(f), str) or not data.get(f)]
@@ -72,7 +103,7 @@ def tv_pair_request(host: str) -> dict:
         raise ApiError(f"pair request answer is no object (HTTP {r.status_code})")
     if data.get("error_id") != "SUCCESS":
         # Only the error id: the answer can hold the auth_key.
-        raise ApiError(f"pair request failed: HTTP {r.status_code}, error_id {data.get('error_id')!r}")
+        raise ApiError(f"pair request failed: HTTP {r.status_code}, error_id {_code(data.get('error_id'))}")
     # The timestamp is signed as text together with the PIN; the TV sends it as a number.
     timestamp = data.get("timestamp")
     missing = _missing(data, "auth_key")
@@ -91,12 +122,15 @@ def tv_pair_grant(host: str, pairing: dict, pin: str) -> tuple[str, str]:
         "auth": {"auth_AppId": "1", "pin": pin, "auth_timestamp": pairing["timestamp"], "auth_signature": sig},
         "device": _device(pairing["id"]),
     }
-    r = requests.post(
+    r = _digest_request(
+        requests.post,
         f"https://{host}:1926/6/pair/grant",
+        pairing["id"],
+        pairing["auth_key"],
+        "pair grant",
         json=body,
         verify=False,
         timeout=10,
-        auth=HTTPDigestAuth(pairing["id"], pairing["auth_key"]),
         allow_redirects=False,
     )
     if r.status_code != 200:
@@ -105,7 +139,7 @@ def tv_pair_grant(host: str, pairing: dict, pin: str) -> tuple[str, str]:
     if not isinstance(data, dict):
         raise ApiError("pair grant answer is no object")
     if data.get("error_id") != "SUCCESS":
-        raise ApiError(f"pair grant failed: error_id {data.get('error_id')!r}")
+        raise ApiError(f"pair grant failed: error_id {_code(data.get('error_id'))}")
     return pairing["id"], pairing["auth_key"]
 
 
@@ -114,11 +148,14 @@ def tv_check_auth(host: str, user: str, password: str) -> None:
 
     Raises TvAuthError when the TV rejects the credentials, ApiError for any other unexpected answer.
     """
-    r = requests.get(
+    r = _digest_request(
+        requests.get,
         f"https://{host}:1926/6/powerstate",
+        user,
+        password,
+        "TV check",
         verify=False,
         timeout=10,
-        auth=HTTPDigestAuth(user, password),
         allow_redirects=False,
     )
     if r.status_code in (401, 403):
@@ -162,7 +199,7 @@ def hue_register(host: str) -> dict | None:
     if isinstance(error, dict) and error.get("type") == 101:
         return None
     error_type = error.get("type") if isinstance(error, dict) else None
-    raise ApiError(f"bridge registration failed: error type {error_type!r}")
+    raise ApiError(f"bridge registration failed: error type {_code(error_type)}")
 
 
 def hue_entertainment_areas(host: str, user: str) -> dict[str, str]:

@@ -94,7 +94,7 @@
       "no_bridge": "Choose a Hue bridge from the list or type its IP address.",
       "no_areas": "The bridge has no entertainment areas. Create one in the Hue app, then submit again.",
       "tv_auth": "The TV at this address does not accept the stored pairing. Submit to pair it again.",
-      "hue_auth": "The Hue bridge does not accept the key."
+      "hue_auth": "The Hue bridge does not accept the key. Press the link button on the bridge again and submit."
     },
     "abort": {
       "already_configured": "This TV and entertainment area are already configured.",

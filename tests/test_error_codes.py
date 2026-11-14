@@ -87,6 +87,22 @@ def test_names_compare_at_the_stored_length(manager_mod):
         manager_mod.check_preset_name(presets, None, long + " and more")
 
 
+def test_an_empty_stored_name_is_never_unchanged(manager_mod):
+    with pytest.raises(ValueError, match="^empty_name$"):
+        manager_mod.preset_name_to_save({"a": {"name": ""}}, "a", "")
+
+
+def test_a_blank_stored_name_is_checked_like_a_new_one(manager_mod):
+    presets = {"a": {"name": "  "}, "movie": {"name": "Movie"}}
+    with pytest.raises(ValueError, match="^duplicate_name$"):
+        manager_mod.preset_name_to_save(presets, "a", "Movie")
+
+
+def test_an_unchanged_name_keeps_the_stored_one_despite_a_twin(manager_mod):
+    presets = {"a": {"name": "Game"}, "b": {"name": "game"}}
+    assert manager_mod.preset_name_to_save(presets, "a", " Game ") == "Game"
+
+
 # ---- _clean_preset ---------------------------------------------------------
 def test_non_dict_extra_lights_are_dropped(manager_mod):
     raw = {"name": "X", "extra_lights": ["light.a", None, 3, {"entity_id": "light.b"}]}
@@ -238,3 +254,13 @@ def test_no_reauth_while_unloading(mgr):
     mgr.reader.state = "auth_failed"
     mgr._on_reader_change()
     assert mgr.entry.reauths == []
+
+
+def test_a_failed_unload_lets_reauth_start_again(mgr):
+    mgr.begin_unload()
+    mgr.reader.state = "auth_failed"
+    mgr._on_reader_change()
+    assert mgr.entry.reauths == []
+    mgr.cancel_unload()  # the platforms did not unload, the entry stays
+    mgr._on_reader_change()
+    assert mgr.entry.reauths == [{**mgr.entry.data, "reauth_target": "tv"}]

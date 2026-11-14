@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import io
+
 import pytest
+import requests
 
 from halo_sync import api
 
@@ -79,6 +82,33 @@ def test_pair_request_failure_does_not_echo_the_answer(post):
     assert "s3cr3t-key" not in str(exc.value)
 
 
+@pytest.mark.parametrize(
+    "error_id",
+    [
+        {"auth_key": "TEST_SECRET"},
+        ["TEST_SECRET"],
+        "TEST_SECRET with spaces",
+        "TEST_SECRET" + "x" * 40,
+    ],
+)
+def test_pair_errors_never_echo_a_complex_error_id(post, error_id):
+    """Only a short plain code is quoted; anything else could carry a credential into the log."""
+    post(FakeResponse(body={"error_id": error_id}))
+    with pytest.raises(api.ApiError) as exc:
+        api.tv_pair_request("tv")
+    assert "TEST_SECRET" not in str(exc.value) and "error_id unexpected" in str(exc.value)
+    post(FakeResponse(body={"error_id": error_id}))
+    with pytest.raises(api.ApiError) as exc:
+        api.tv_pair_grant("tv", PAIRING, "1234")
+    assert "TEST_SECRET" not in str(exc.value) and "error_id unexpected" in str(exc.value)
+
+
+def test_pair_error_without_error_id_says_missing(post):
+    post(FakeResponse(body={}))
+    with pytest.raises(api.ApiError, match="error_id missing$"):
+        api.tv_pair_request("tv")
+
+
 @pytest.mark.parametrize("answer", [FakeResponse(body=["x"]), FakeResponse(raw=True), FakeResponse(body=None)])
 def test_pair_request_unexpected_answer_is_api_error(post, answer):
     post(answer)
@@ -121,6 +151,58 @@ def test_tv_check_auth(get):
     assert all(kwargs["allow_redirects"] is False for _url, kwargs in rec.calls)
 
 
+# ---- malformed digest challenge -----------------------------------------------------------------
+class _ChallengeAdapter(requests.adapters.BaseAdapter):
+    """Local transport: every request gets this answer, or raises `fail`; nothing leaves the process."""
+
+    def __init__(self, challenge: str = "", fail: Exception | None = None):
+        super().__init__()
+        self.challenge, self.fail, self.sent = challenge, fail, 0
+
+    def send(self, request, **kwargs):
+        self.sent += 1
+        if self.fail is not None:
+            raise self.fail
+        r = requests.Response()
+        r.status_code, r.reason, r.url, r.request = 401, "Unauthorized", request.url, request
+        r.headers = requests.structures.CaseInsensitiveDict({"WWW-Authenticate": self.challenge})
+        r.raw = io.BytesIO(b"")
+        return r
+
+    def close(self):
+        pass
+
+
+@pytest.fixture
+def transport(monkeypatch):
+    def install(**kwargs):
+        adapter = _ChallengeAdapter(**kwargs)
+        monkeypatch.setattr(requests.Session, "get_adapter", lambda self, url: adapter)
+        return adapter
+
+    return install
+
+
+@pytest.mark.parametrize("challenge", ['Digest realm="tv"', 'Digest nonce="n"', "Digest"])
+def test_malformed_digest_challenge_is_api_error(transport, challenge):
+    adapter = transport(challenge=challenge)
+    with pytest.raises(api.ApiError) as exc:
+        api.tv_check_auth("tv.invalid", "dev", "s3cr3t-key")
+    assert not isinstance(exc.value, api.TvAuthError) and "s3cr3t" not in str(exc.value)
+    with pytest.raises(api.ApiError) as exc:
+        api.tv_pair_grant("tv.invalid", PAIRING, "1234")
+    assert "s3cr3t" not in str(exc.value)
+    assert adapter.sent == 2  # no request left the local transport
+
+
+def test_network_errors_stay_request_exceptions(transport):
+    """InvalidURL is a ValueError too; it must not turn into an ApiError."""
+    transport(fail=requests.exceptions.InvalidURL("bad"))
+    with pytest.raises(requests.RequestException) as exc:
+        api.tv_check_auth("tv.invalid", "dev", "s3cr3t-key")
+    assert not isinstance(exc.value, api.ApiError)
+
+
 # ---- Hue registration ---------------------------------------------------------------------------
 def test_hue_register_ok(post, get):
     post(FakeResponse(body=[{"success": {"username": "user", "clientkey": "ck"}}]))
@@ -142,8 +224,11 @@ def test_hue_register_link_button(post):
         [{"error": {"type": 7}}],
         [{"success": None, "error": None}],
         [{"success": "x"}],
-        [{"success": {"username": "user"}}],
-        [{"success": {"username": 5, "clientkey": "ck"}}],
+        [{"success": {"username": "s3cr3t-user"}}],
+        [{"success": {"username": 5, "clientkey": "s3cr3t-ck"}}],
+        [{"success": {"username": "s3cr3t-user", "clientkey": ""}}],
+        [{"error": {"type": {"username": "s3cr3t-user"}}}],
+        [{"error": {"type": "s3cr3t-user and more"}}],
         [],
         [None],
         {"error": {"type": 101}},
@@ -151,14 +236,22 @@ def test_hue_register_link_button(post):
 )
 def test_hue_register_unexpected_answer_is_api_error(post, body):
     post(FakeResponse(body=body))
-    with pytest.raises(api.ApiError):
+    with pytest.raises(api.ApiError) as exc:
         api.hue_register("bridge")
+    assert "s3cr3t" not in str(exc.value)
 
 
 def test_hue_register_without_appid_is_api_error(post, get):
-    post(FakeResponse(body=[{"success": {"username": "user", "clientkey": "ck"}}]))
+    post(FakeResponse(body=[{"success": {"username": "s3cr3t-user", "clientkey": "s3cr3t-ck"}}]))
     get(FakeResponse(status=302, headers={}))
-    with pytest.raises(api.ApiError):
+    with pytest.raises(api.ApiError) as exc:
+        api.hue_register("bridge")
+    assert "s3cr3t" not in str(exc.value)
+
+
+def test_hue_register_names_a_plain_error_type(post):
+    post(FakeResponse(body=[{"error": {"type": 7, "description": "invalid value"}}]))
+    with pytest.raises(api.ApiError, match="error type 7$"):
         api.hue_register("bridge")
 
 
