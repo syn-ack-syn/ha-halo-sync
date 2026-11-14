@@ -108,7 +108,7 @@ class HaloSyncPanel extends HTMLElement {
   _e(key, vars) { return esc(this._t(key, vars)); }
   _opt(key, vars) { return this._t.has(key) ? this._t(key, vars) : ""; }
   _n(v) { return v === undefined || v === null || v === "" ? "-" : typeof v === "number" ? this._nf.format(v) : String(v); }
-  _val(tn, v) { return this._n(v) + (tn.unit ? " " + this._t("unit." + tn.unit) : ""); }
+  _val(tn, v) { return this._n(v) + (tn.unit ? " " + this._t("unit." + tn.unit) : ""); }
   _wsErr(e) {
     const code = e && e.code;
     if (typeof code === "string" && this._t.has("ws." + code)) return this._t("ws." + code);
@@ -134,14 +134,15 @@ class HaloSyncPanel extends HTMLElement {
     return `<${tag} class="card"><div class="cin" id="${id}"></div></${tag}>`;
   }
 
-  // kind: primary (filled), text, danger (filled red), danger-text. label must be escaped.
+  // kind: primary (filled), tonal (tinted, everyday actions), danger (filled red), danger-outline. label must be escaped.
   _btn(id, label, kind = "primary", attrs = "") {
     const idAttr = id ? ` id="${id}"` : "";
     if (has("ha-button")) {
       const filled = kind === "primary" || kind === "danger";
       const danger = kind.startsWith("danger");
-      // The current ha-button reads appearance/variant, the older mwc-based one unelevated and --mdc-theme-primary.
-      return `<ha-button${idAttr} appearance="${filled ? "accent" : "plain"}" variant="${danger ? "danger" : "brand"}"${filled ? " unelevated" : ""}${danger ? ' style="--mdc-theme-primary: var(--error-color)"' : ""} ${attrs}>${label}</ha-button>`;
+      const appearance = filled ? "accent" : kind === "tonal" ? "filled" : "outlined";
+      // The current ha-button reads appearance/variant, the older mwc-based one unelevated/outlined and --mdc-theme-primary.
+      return `<ha-button${idAttr} appearance="${appearance}" variant="${danger ? "danger" : "brand"}"${filled ? " unelevated" : " outlined"}${danger ? ' style="--mdc-theme-primary: var(--error-color)"' : ""} ${attrs}>${label}</ha-button>`;
     }
     return `<button type="button"${idAttr} class="btn ${kind}" ${attrs}>${label}</button>`;
   }
@@ -200,12 +201,12 @@ class HaloSyncPanel extends HTMLElement {
 
   disconnectedCallback() {
     // A change still waiting for the save timer goes out now; the panel loses its connection below.
-    const conn = this._hass?.connection;
-    if (this._pending && conn) {
+    if (this._pending) {
       clearTimeout(this._saveTimer);
       const job = this._pending;
       this._pending = null;
-      conn.sendMessagePromise({ type: `${D}/save`, entry_id: this._entryId, preset_id: job.id, preset: job.preset }).catch(() => {});
+      // The job keeps the connection it was queued on; once the backend has the change it is no longer unsaved.
+      if (job.conn) this._sendSave(job).then(() => { if (this._unsaved.get(job.id) === job.preset) this._unsaved.delete(job.id); }, () => {});
     }
     if (this._unsub) this._unsub();
     this._unsub = null;
@@ -242,12 +243,19 @@ class HaloSyncPanel extends HTMLElement {
 
   _queueSave() {
     // The id and a copy are taken now: switching presets before the timer fires must not save into another one.
-    const job = { id: this._editId, preset: structuredClone(this._draft) };
+    // The connection too: should the panel be closed meanwhile, the save still goes out.
+    const job = { id: this._editId, preset: structuredClone(this._draft), conn: this._hass?.connection, entry: this._entryId };
     this._pending = job;
     this._unsaved.set(job.id, job.preset);
     this._setSaveState("saving");
     clearTimeout(this._saveTimer);
     this._saveTimer = setTimeout(() => this._flushSave(), 300);
+  }
+
+  // Same message as _msg("save", ...), over the connection the job was queued on.
+  _sendSave(job) {
+    if (!job.conn) return Promise.reject(new Error("no connection"));
+    return job.conn.sendMessagePromise({ type: `${D}/save`, entry_id: job.entry, preset_id: job.id, preset: job.preset });
   }
 
   _flushSave() {
@@ -260,14 +268,15 @@ class HaloSyncPanel extends HTMLElement {
     // One save after the other, in the order they were made.
     this._saveChain = this._saveChain.then(async () => {
       try {
-        const r = await this._msg("save", { preset_id: job.id, preset: job.preset });
+        const r = await this._sendSave(job);
         this._state = { ...this._state, presets: r.presets, active: r.active };
+        // Only a confirmed copy leaves the unsaved list; after an error the draft keeps what was typed.
+        if (this._unsaved.get(job.id) === job.preset) this._unsaved.delete(job.id);
         if (!this._pending && this._saving === 1 && this._saveState === "saving") this._setSaveState("saved");
       } catch (e) {
         this._setSaveState({ error: this._wsErr(e) });
       } finally {
         this._saving--;
-        if (this._unsaved.get(job.id) === job.preset) this._unsaved.delete(job.id);
         this._renderPresets();
       }
     });
@@ -279,8 +288,8 @@ class HaloSyncPanel extends HTMLElement {
   _setAutoResume(enabled) { return this._try("status", async () => this._apply(await this._msg("auto_resume", { enabled }))); }
   _setLightsOff(enabled) { return this._try("status", async () => this._apply(await this._msg("lights_off_with_tv", { enabled }))); }
 
-  _activate(id) {
-    this._flushSave();
+  async _activate(id) {
+    await this._flushSave();
     return this._try("presets", async () => {
       const r = await this._msg("activate", { preset: id });
       this._editId = id;
@@ -321,26 +330,35 @@ class HaloSyncPanel extends HTMLElement {
 
   // New preset and Duplicate both start from the preset in the editor, like before.
   async _newPreset(duplicate) {
-    await this._flushSave();
-    const name = this._freeName(duplicate ? this._draft.name : null);
-    await this._try(duplicate ? "editor" : "presets", async () => {
-      const r = await this._msg("save", { preset_id: null, preset: { ...structuredClone(this._draft), name } });
-      this._editId = r.preset_id;
-      this._selLight = 0;
-      this._confirmDelete = false;
-      this._apply(r);
-      const inp = this.shadowRoot.getElementById("pname");
-      if (inp) { inp.focus(); inp.select(); }
-    });
+    if (this._creating) return; // a second click while the first preset is still being created
+    this._creating = true;
+    try {
+      // The source is taken before waiting: the reply to the pending save may replace the draft.
+      const src = structuredClone(this._draft);
+      await this._flushSave();
+      const name = this._freeName(duplicate ? src.name : null);
+      await this._try(duplicate ? "editor" : "presets", async () => {
+        const r = await this._msg("save", { preset_id: null, preset: { ...src, name } });
+        this._editId = r.preset_id;
+        this._selLight = 0;
+        this._confirmDelete = false;
+        this._apply(r);
+        const inp = this.shadowRoot.getElementById("pname");
+        if (inp) { inp.focus(); inp.select(); }
+      });
+    } finally {
+      this._creating = false;
+    }
   }
 
   async _delete() {
-    // Pending changes are saved first: should the delete fail (last preset), nothing is lost.
-    await this._flushSave();
+    // The id is taken before waiting. Pending changes are saved first: should the delete fail (last preset), nothing is lost.
     const id = this._editId;
+    await this._flushSave();
     this._confirmDelete = false;
     await this._try("editor", async () => {
       const r = await this._msg("delete", { preset_id: id });
+      this._unsaved.delete(id);
       this._editId = null;
       this._draftId = null;
       this._saveState = null;
@@ -353,6 +371,7 @@ class HaloSyncPanel extends HTMLElement {
     this._confirmReset = false;
     await this._try("reset", async () => {
       const r = await this._msg("reset");
+      this._unsaved.clear(); // the defaults replace every preset, kept copies would bring old values back
       this._editId = null;
       this._draftId = null;
       this._saveState = null;
@@ -394,14 +413,33 @@ class HaloSyncPanel extends HTMLElement {
     const s = this._state;
     const st = s.stats || {};
     const T = (k, v) => this._e(k, v);
-    const waiting = !s.running && s.resume_pending;
-    const [stateKey, cls] = s.running ? ["state.streaming", "ok"] : waiting ? ["state.waiting", "warn"] : s.error ? ["state.error", "err"] : ["state.stopped", "off"];
-    const detail = s.running ? this._linkText(s) : waiting ? this._t("state.waiting_hint") : s.error ? this._errText(s) : "";
-    const detailCls = s.running ? "warn" : waiting ? "muted" : "err";
+    // Order matters: a TV that refuses the pairing is an error even while auto resume waits for it,
+    // and a stream that stopped because the TV went to standby is not an error.
+    const authFailed = !s.running && s.reader_state === "auth_failed";
+    const waiting = !s.running && !authFailed && s.resume_pending;
+    const standby = !s.running && !authFailed && !waiting && s.error_code === "tv_standby";
+    let stateKey = "state.stopped", cls = "off", detail = "", detailCls = "muted";
+    if (s.running) {
+      // An error while streaming (e.g. the bridge seems to reject the key) comes before the link state.
+      [stateKey, cls] = ["state.streaming", "ok"];
+      detail = s.error_code ? this._errText(s) : this._linkText(s);
+      detailCls = s.error_code ? "err" : "warn";
+    } else if (authFailed) {
+      [stateKey, cls, detailCls] = ["state.error", "err", "err"];
+      detail = this._t("error.tv_auth") + " " + this._t("error.repair_hint");
+    } else if (waiting) {
+      [stateKey, cls] = ["state.waiting", "warn"];
+      detail = this._t("state.waiting_hint");
+    } else if (standby) {
+      detail = this._errText(s);
+    } else if (s.error) {
+      [stateKey, cls, detailCls] = ["state.error", "err", "err"];
+      detail = this._errText(s);
+    }
     const ts = s.tv_style;
     const tvStyle = !ts ? "" : ts.category === "off" ? this._t("tvstyle.off") : ts.category === "video" ? this._t("tvstyle.video", { name: ts.name ?? "" })
       : ts.category === "audio" ? this._t("tvstyle.audio") : this._t("tvstyle.fixed");
-    const reads = st.tv_reads_per_s ? T("kv.reads_value", { rate: this._n(st.tv_reads_per_s), ms: this._n(st.tv_read_median_ms) }) : T("kv.none");
+    const reads = st.tv_reads_per_s ? T("kv.reads_value", { rate: this._n(st.tv_reads_per_s), ms: this._n(st.tv_read_median_ms) }) : T(s.running ? "kv.reads_wait" : "kv.reads_off");
     const kv = (k, v) => `<div><dt>${k}</dt><dd>${v}</dd></div>`;
     el.innerHTML = `
       <div class="status">
@@ -449,12 +487,14 @@ class HaloSyncPanel extends HTMLElement {
       <div class="h">${T("presets.title")}</div>
       <div class="presets">${Object.entries(s.presets).map(([id, p]) => `
         <div class="preset ${id === this._editId ? "editing" : ""}" data-id="${esc(id)}"${id === this._editId ? ' aria-current="true"' : ""}>
-          <div class="ptop"><div class="pname">${esc(p.name)}</div>${id === s.active ? `<span class="badge">${T("presets.active")}</span>` : ""}</div>
+          <div class="pname">${esc(p.name)}</div>
           <div class="pmeta">${esc(this._meta(p))}</div>
-          <div class="pact">${id === s.active ? "" : this._btn("", T("presets.activate"), "primary", 'data-act="activate"')}${this._btn("", T("presets.edit"), "text", 'data-act="edit"')}</div>
+          <div class="pact">${id === s.active
+            ? `<span class="badge">${T("presets.active")}</span>`
+            : this._btn("", T("presets.activate"), "primary", 'data-act="activate"')}${this._btn("", T("presets.edit"), "tonal", 'data-act="edit"')}</div>
         </div>`).join("")}
       </div>
-      <div class="row btns">${this._btn("new", "+ " + T("presets.new"), "text")}</div>
+      <div class="row btns">${this._btn("new", "+ " + T("presets.new"), "tonal")}</div>
       <div class="err" id="err-presets" role="alert">${esc(this._errs.presets || "")}</div>`;
     el.querySelectorAll(".preset").forEach((card) => {
       const act = card.querySelector('[data-act="activate"]');
@@ -492,30 +532,32 @@ class HaloSyncPanel extends HTMLElement {
       <div class="h">${T("editor.title")}<span class="grow"></span><span class="savestate" id="savestate" aria-live="polite"></span></div>
       <div class="field"><div class="fhead"><label for="pname">${T("editor.name")}</label></div>
         <div class="fctl"><input id="pname" type="text" value="${esc(d.name)}" maxlength="${NAME_MAX}" autocomplete="off"></div></div>
-      <section class="group"><h3>${T("group.source")}</h3>
+      <div class="egrid">
+      <section class="group g-left"><h3>${T("group.source")}</h3>
         ${this._selectField("source", "field.mode", SOURCES.map((v) => ({ value: v, label: t(`source.${v}.label`) })), d.source, this._opt(`source.${d.source}.hint`))}
         ${this._selectField("zmode", "field.zone_mode", ZONE_MODES.map((v) => ({ value: v, label: t(`zone.${v}.label`) })), d.zone_mode, this._opt(`zone.${d.zone_mode}.hint`))}
         ${sliders("source")}
         <div id="nativezones"></div>
       </section>
-      <section class="group"><h3>${T("group.light")}</h3>
+      <section class="group g-left"><h3>${T("group.light")}</h3>
         ${sliders("light")}
         ${this._selectField("darkc", "field.dark", DARK_CONTENT.map((v) => ({ value: v, label: t(`dark.${v}`) })), d.dark_content, t("field.dark_hint"))}
       </section>
-      ${smoothing ? `<section class="group"><h3>${T("group.smoothing")}</h3>${smoothing}</section>` : ""}
-      <section class="group"><h3>${T("group.positions")}</h3>
+      ${smoothing ? `<section class="group g-left"><h3>${T("group.smoothing")}</h3>${smoothing}</section>` : ""}
+      <section class="group g-pos"><h3>${T("group.positions")}</h3>
         <div class="muted">${T("positions.hint")}</div>
         <svg id="diagram" viewBox="-2.84 -1.6 5.69 3.2"></svg>
-        <div class="row btns">${this._btn("refreshpos", T("positions.refresh"), "text")}</div>
+        <div class="row btns">${this._btn("refreshpos", T("positions.refresh"), "tonal")}</div>
       </section>
-      <section class="group"><h3>${T("group.extra")}</h3>
+      <section class="group g-left"><h3>${T("group.extra")}</h3>
         <div class="muted">${T("extra.hint")}</div>
         <div id="extras"></div>
-        <div class="row btns">${this._btn("addlight", "+ " + T("extra.add"), "text")}</div>
+        <div class="row btns">${this._btn("addlight", "+ " + T("extra.add"), "tonal")}</div>
       </section>
-      <div class="row btns foot">${this._btn("dup", T("editor.duplicate"), "text")}<span class="grow"></span>${this._confirmDelete
-        ? this._btn("del-no", T("common.cancel"), "text") + this._btn("del-yes", T("editor.delete_confirm"), "danger")
-        : this._btn("del", T("editor.delete"), "danger-text")}</div>
+      </div>
+      <div class="row btns foot">${this._btn("dup", T("editor.duplicate"), "tonal")}<span class="grow"></span>${this._confirmDelete
+        ? this._btn("del-no", T("common.cancel"), "tonal") + this._btn("del-yes", T("editor.delete_confirm"), "danger")
+        : this._btn("del", T("editor.delete"), "danger-outline")}</div>
       <div class="err" id="err-editor" role="alert">${esc(this._errs.editor || "")}</div>`;
 
     el.querySelector("#pname").oninput = (e) => { d.name = e.target.value; this._queueSave(); };
@@ -593,18 +635,22 @@ class HaloSyncPanel extends HTMLElement {
     const lights = this._state.lights || [];
     const T = (k, v) => this._e(k, v);
     if (!d.extra_lights.length) { el.innerHTML = `<div class="muted none">${T("extra.none")}</div>`; return; }
+    const num = (f, key, min, max, step, v) =>
+      `<label class="xf"><span>${T(key)}</span><input type="number" data-f="${f}" min="${min}" max="${max}" step="${step}" value="${esc(v)}"></label>`;
     el.innerHTML = d.extra_lights.map((l, i) => {
       const name = lights.find((o) => o.entity_id === l.entity_id)?.name || l.entity_id;
       return `
       <div class="xrow ${i === this._selLight ? "sel" : ""}" data-i="${i}">
-        <select data-f="entity_id" aria-label="${T("extra.light")}">${lights.map((o) => `<option value="${esc(o.entity_id)}" ${o.entity_id === l.entity_id ? "selected" : ""}>${esc(o.name)}</option>`).join("")}</select>
-        <div class="xnums">
-          <label>${T("extra.x")} <input type="number" data-f="x" min="-1.5" max="1.5" step="0.05" value="${esc(l.x)}"></label>
-          <label>${T("extra.z")} <input type="number" data-f="z" min="-1.5" max="1.5" step="0.05" value="${esc(l.z)}"></label>
-          <label>${T("extra.hz")} <input type="number" data-f="update_hz" min="0.2" max="10" step="0.5" value="${esc(l.update_hz)}"></label>
-          <label>${T("extra.transition")} <input type="number" data-f="transition" min="0" max="5" step="0.1" value="${esc(l.transition)}"></label>
+        <div class="xtop">
+          <select data-f="entity_id" aria-label="${T("extra.light")}">${lights.map((o) => `<option value="${esc(o.entity_id)}" ${o.entity_id === l.entity_id ? "selected" : ""}>${esc(o.name)}</option>`).join("")}</select>
+          <button type="button" class="xdel" data-f="remove" aria-label="${T("extra.remove", { name })}" title="${T("extra.remove", { name })}">✕</button>
         </div>
-        <button type="button" class="xdel" data-f="remove" aria-label="${T("extra.remove", { name })}" title="${T("extra.remove", { name })}">✕</button>
+        <div class="xnums">
+          ${num("x", "extra.x", -1.5, 1.5, 0.05, l.x)}
+          ${num("z", "extra.z", -1.5, 1.5, 0.05, l.z)}
+          ${num("update_hz", "extra.hz", 0.2, 10, 0.5, l.update_hz)}
+          ${num("transition", "extra.transition", 0, 5, 0.1, l.transition)}
+        </div>
       </div>`;
     }).join("");
     el.querySelectorAll(".xrow").forEach((row) => {
@@ -681,8 +727,8 @@ class HaloSyncPanel extends HTMLElement {
       <div class="h">${T("reset.title")}</div>
       <div class="muted">${T("reset.text")}</div>
       <div class="row btns">${this._confirmReset
-        ? this._btn("reset-no", T("common.cancel"), "text") + this._btn("reset-yes", T("reset.confirm"), "danger")
-        : this._btn("reset-ask", T("reset.button"), "danger-text")}</div>
+        ? this._btn("reset-no", T("common.cancel"), "tonal") + this._btn("reset-yes", T("reset.confirm"), "danger")
+        : this._btn("reset-ask", T("reset.button"), "danger-outline")}</div>
       <div class="err" id="err-reset" role="alert">${esc(this._errs.reset || "")}</div>`;
     if (this._confirmReset) {
       el.querySelector("#reset-no").onclick = () => { this._confirmReset = false; this._renderReset(); };
@@ -700,7 +746,6 @@ class HaloSyncPanel extends HTMLElement {
 
 // Rules for a narrow panel (phones, or a narrow window next to the sidebar).
 const NARROW = `
-  .field { grid-template-columns: minmax(0,1fr); grid-template-areas: "head" "ctl" "hint"; }
   dl.kv { grid-template-columns: minmax(0,1fr); }
   .net table { font-size:12px; } .net th, .net td { padding:4px 3px; }
 `;
@@ -711,7 +756,7 @@ const CSS = `
   .toolbar { display:flex; align-items:center; height:56px; padding:0 8px; background: var(--app-header-background-color, var(--primary-color)); color: var(--app-header-text-color, #fff); }
   .title { font-size:20px; margin-left:8px; }
   .loaderr { padding:24px; }
-  .wrap { max-width:960px; margin:0 auto; padding:16px; display:grid; grid-template-columns: minmax(0,1fr); gap:16px; container-type: inline-size; box-sizing:border-box; }
+  .wrap { max-width:1100px; margin:0 auto; padding:16px; display:grid; grid-template-columns: minmax(0,1fr); gap:16px; container-type: inline-size; box-sizing:border-box; }
   .wrap > * { min-width:0; }
   div.card { background: var(--ha-card-background, var(--card-background-color)); border-radius: var(--ha-card-border-radius, 12px);
     border: 1px solid var(--ha-card-border-color, var(--divider-color, #e0e0e0)); box-shadow: var(--ha-card-box-shadow, none); }
@@ -731,9 +776,10 @@ const CSS = `
     display:inline-flex; align-items:center; justify-content:center; gap:6px; }
   .btn.primary { background: var(--primary-color); color: var(--text-primary-color, #fff); }
   .btn.danger { background: var(--error-color, #db4437); color: #fff; }
-  .btn.text { background: transparent; color: var(--primary-color); }
-  .btn.danger-text { background: transparent; color: var(--error-color, #db4437); }
-  .btn.text:hover, .btn.danger-text:hover { background: rgba(127,127,127,.12); }
+  .btn.tonal { background: rgba(127,127,127,.16); background: color-mix(in srgb, var(--primary-color) 16%, transparent); color: var(--primary-color); }
+  .btn.danger-outline { background: transparent; color: var(--error-color, #db4437); box-shadow: inset 0 0 0 1px var(--error-color, #db4437); }
+  .btn.tonal:hover { background: color-mix(in srgb, var(--primary-color) 24%, transparent); }
+  .btn.danger-outline:hover { background: color-mix(in srgb, var(--error-color, #db4437) 10%, transparent); }
   .btn.primary:hover, .btn.danger:hover { filter: brightness(1.08); }
   .btn:focus-visible { outline:2px solid var(--primary-color); outline-offset:2px; }
   .btn[disabled] { opacity:.6; cursor:wait; }
@@ -752,7 +798,8 @@ const CSS = `
   select:focus, input[type="text"]:focus, input[type="number"]:focus { outline:none; border-color: var(--primary-color); box-shadow: 0 0 0 1px var(--primary-color); }
   select option { background: var(--card-background-color, #fff); color: var(--primary-text-color); }
   input[type="range"] { width:100%; margin:0; accent-color: var(--primary-color); }
-  .field { display:grid; grid-template-columns: minmax(0,2fr) minmax(0,3fr); grid-template-areas: "head ctl" "hint hint"; gap:4px 16px; align-items:center; margin:12px 0; }
+  /* label row on top (value right-aligned in it), control below, hint last: the same at every width */
+  .field { display:grid; grid-template-columns: minmax(0,1fr); grid-template-areas: "head" "ctl" "hint"; gap:4px; margin:12px 0; }
   .fhead { grid-area: head; display:flex; justify-content:space-between; align-items:baseline; gap:8px; min-width:0; }
   .fhead label { min-width:0; overflow-wrap:anywhere; }
   .fhead output { font-variant-numeric: tabular-nums; white-space:nowrap; color: var(--primary-text-color); font-weight:500; }
@@ -762,6 +809,7 @@ const CSS = `
   .pos { font-size:12px; color: var(--secondary-text-color); }
   section.group { border-top:1px solid var(--divider-color); margin-top:16px; }
   section.group h3 { font-size:16px; font-weight:500; margin:16px 0 4px; }
+  .egrid { min-width:0; }
 
   /* status */
   .status { display:flex; flex-wrap:wrap; align-items:center; gap:12px 16px; }
@@ -781,20 +829,22 @@ const CSS = `
   .ttext small { display:block; margin-top:2px; font-size:12px; color: var(--secondary-text-color); }
 
   /* presets */
-  .presets { display:grid; grid-template-columns: repeat(auto-fill, minmax(min(200px,100%),1fr)); gap:12px; }
+  .presets { display:grid; grid-template-columns: repeat(auto-fill, minmax(min(220px,100%),1fr)); gap:12px; }
   .preset { border:1px solid var(--divider-color); border-radius:12px; padding:12px; display:flex; flex-direction:column; gap:6px; min-width:0; }
   .preset.editing { border-color: var(--primary-color); box-shadow: inset 0 0 0 1px var(--primary-color); }
-  .ptop { display:flex; align-items:center; justify-content:space-between; gap:8px; }
   .pname { font-weight:500; font-size:16px; min-width:0; overflow-wrap:anywhere; }
-  .badge { flex:none; font-size:12px; font-weight:500; padding:2px 10px; border-radius:12px; background: var(--primary-color); color: var(--text-primary-color, #fff); }
   .pmeta { font-size:12px; color: var(--secondary-text-color); }
-  .pact { display:flex; flex-wrap:wrap; gap:8px; margin-top:auto; }
+  .pact { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-top:auto; padding-top:6px; }
+  /* "Active" stands where the other tiles have their Activate button, at the same height */
+  .badge { flex:none; display:inline-flex; align-items:center; gap:6px; min-height:36px; box-sizing:border-box; padding:0 14px; border-radius:18px;
+    font-size:14px; font-weight:500; color: var(--success-color, #43a047); background: rgba(67,160,71,.16); background: color-mix(in srgb, var(--success-color, #43a047) 16%, transparent); }
+  .badge::before { content:"✓"; }
   .savestate { font-size:14px; color: var(--secondary-text-color); }
   .savestate.err { color: var(--error-color, #db4437); }
   .foot { border-top:1px solid var(--divider-color); padding-top:12px; margin-top:16px; }
 
   /* positions */
-  svg { display:block; width:100%; max-width:520px; aspect-ratio:16 / 9; margin-top:8px; background: var(--secondary-background-color); border-radius:12px; cursor:crosshair; }
+  svg { display:block; width:100%; max-width:560px; aspect-ratio:16 / 9; margin:8px auto 0; background: var(--secondary-background-color); border-radius:12px; cursor:crosshair; }
   svg .tv { fill: var(--primary-text-color); fill-opacity:.08; stroke: var(--secondary-text-color); stroke-width:0.02; }
   svg .tvlabel { fill: var(--secondary-text-color); font-size:0.22px; text-anchor:middle; }
   svg .hue { fill: var(--primary-color); }
@@ -802,12 +852,15 @@ const CSS = `
   svg .xl { fill: var(--accent-color, #ff9800); } svg .xl.sel { stroke: var(--primary-text-color); stroke-width:0.03; }
 
   /* other lights */
-  .xrow { display:flex; flex-wrap:wrap; gap:8px; align-items:center; padding:8px; margin:8px 0; border-radius:8px; border:1px solid var(--divider-color); cursor:pointer; min-width:0; }
+  /* one small card per light: light and remove on top, the four numbers below in two columns */
+  .xrow { padding:8px 12px 12px; margin:8px 0; border-radius:12px; border:1px solid var(--divider-color); cursor:pointer; min-width:0; }
   .xrow.sel { border-color: var(--primary-color); box-shadow: inset 0 0 0 1px var(--primary-color); }
-  .xrow select { flex:1 1 200px; min-width:0; }
-  .xnums { display:flex; flex-wrap:wrap; gap:8px; min-width:0; }
-  .xnums label { font-size:12px; color: var(--secondary-text-color); display:flex; gap:4px; align-items:center; }
-  .xnums input { width:72px; padding:6px; }
+  .xtop { display:flex; align-items:center; gap:8px; min-width:0; }
+  .xtop select { flex:1 1 auto; width:100%; min-width:0; }
+  .xnums { display:grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap:8px 12px; margin-top:8px; align-items:end; }
+  .xf { display:flex; flex-direction:column; gap:4px; min-width:0; font-size:12px; color: var(--secondary-text-color); cursor:pointer; }
+  .xf span { overflow-wrap:anywhere; }
+  .xf input { width:100%; padding:6px 8px; }
   .xdel { font: inherit; width:32px; height:32px; flex:none; border:none; border-radius:50%; background:transparent; color: var(--secondary-text-color); cursor:pointer; }
   .xdel:hover { background: rgba(127,127,127,.12); color: var(--error-color, #db4437); }
   .xdel:focus-visible { outline:2px solid var(--primary-color); }
@@ -824,6 +877,13 @@ const CSS = `
   .verdict.fair { border-left-color: var(--warning-color, #fb8c00); }
   .verdict.poor, .verdict.unreachable { border-left-color: var(--error-color, #db4437); }
 
+  /* wide: slider groups on the left, the positions diagram on the right and in view while scrolling */
+  @container (min-width: 900px) {
+    .egrid { display:grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); column-gap:32px; align-items:start; }
+    .egrid > .g-left { grid-column:1; }
+    .egrid > .g-pos { grid-column:2; grid-row: 1 / span 5; position:sticky; top:16px; }
+    .g-pos svg { max-width:none; }
+  }
   @container (max-width: 600px) { ${NARROW} }
   @media (max-width: 600px) { ${NARROW} .wrap { padding:8px; gap:8px; } .cin { padding:12px; } }
 `;
