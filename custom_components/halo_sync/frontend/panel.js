@@ -13,7 +13,9 @@ const TUNABLES = [
   { key: "saturation", min: 0.5, max: 2, step: 0.05, unit: "times" },
   { key: "smoothing_color", min: 0, max: 1500, step: 10, unit: "ms", when: (d) => d.smoothing_mode !== "native" || d.source === "tv_style" },
   { key: "smoothing_brightness", min: 0, max: 2000, step: 10, unit: "ms", when: (d) => d.smoothing_mode !== "native" || d.source === "tv_style" },
-  { key: "spread", min: 0.2, max: 2, step: 0.05, when: (d) => d.zone_mode === "smooth" },
+  // spread is the sigma of a gaussian in screen coordinates (x and z run from -1 to 1, see zones.py), so the stretch
+  // of the edge that counts strongly (about 2 sigma) is spread x the screen width: shown in percent of it.
+  { key: "spread", min: 0.2, max: 2, step: 0.05, unit: "screen", scale: 100, when: (d) => d.zone_mode === "smooth" },
   { key: "zone_count", min: 1, max: 8, step: 1, when: (d) => d.zone_mode === "some" },
   // Meant for TV zones and the TV filter. The stream applies it in every mode, so a value above 0 stays visible.
   { key: "native_delay", min: 0, max: 100, step: 5, unit: "percent",
@@ -71,9 +73,11 @@ class HaloSyncPanel extends HTMLElement {
     this._unsaved = new Map(); // preset id -> latest copy not confirmed by the backend yet
     this._saveChain = Promise.resolve();
     this._saving = 0; // saves handed to the chain and not answered yet
+    this._inFlight = new Map(); // preset id -> saves of it handed to the chain and not answered yet
     this._saveState = null; // null | "saving" | "saved" | { error }
     this._errs = {};
     this._confirmDelete = false;
+    this._deleting = false;
     this._confirmReset = false;
     this._setLang("en");
   }
@@ -108,7 +112,11 @@ class HaloSyncPanel extends HTMLElement {
   _e(key, vars) { return esc(this._t(key, vars)); }
   _opt(key, vars) { return this._t.has(key) ? this._t(key, vars) : ""; }
   _n(v) { return v === undefined || v === null || v === "" ? "-" : typeof v === "number" ? this._nf.format(v) : String(v); }
-  _val(tn, v) { return this._n(v) + (tn.unit ? " " + this._t("unit." + tn.unit) : ""); }
+  _val(tn, v) {
+    // "scale" turns the stored value into the number shown (spread 1 = 100 % of the screen width).
+    const shown = tn.scale && typeof v === "number" ? Math.round(v * tn.scale) : v;
+    return this._n(shown) + (tn.unit ? "\u00a0" + this._t("unit." + tn.unit) : "");
+  }
   _wsErr(e) {
     const code = e && e.code;
     if (typeof code === "string" && this._t.has("ws." + code)) return this._t("ws." + code);
@@ -205,8 +213,13 @@ class HaloSyncPanel extends HTMLElement {
       clearTimeout(this._saveTimer);
       const job = this._pending;
       this._pending = null;
-      // The job keeps the connection it was queued on; once the backend has the change it is no longer unsaved.
-      if (job.conn) this._sendSave(job).then(() => { if (this._unsaved.get(job.id) === job.preset) this._unsaved.delete(job.id); }, () => {});
+      // The job keeps the connection it was queued on and goes behind the saves already on their way, in order.
+      // Once the backend has the change it is no longer unsaved. The links of the chain never reject.
+      if (job.conn) {
+        this._saveChain = this._saveChain
+          .then(() => this._sendSave(job))
+          .then(() => { if (this._unsaved.get(job.id) === job.preset) this._unsaved.delete(job.id); }, () => {});
+      }
     }
     if (this._unsub) this._unsub();
     this._unsub = null;
@@ -254,7 +267,7 @@ class HaloSyncPanel extends HTMLElement {
 
   // Same message as _msg("save", ...), over the connection the job was queued on.
   _sendSave(job) {
-    if (!job.conn) return Promise.reject(new Error("no connection"));
+    if (!job.conn) return Promise.reject(Object.assign(new Error("no connection"), { code: "no_connection" }));
     return job.conn.sendMessagePromise({ type: `${D}/save`, entry_id: job.entry, preset_id: job.id, preset: job.preset });
   }
 
@@ -265,6 +278,7 @@ class HaloSyncPanel extends HTMLElement {
     if (!job) return this._saveChain;
     this._pending = null;
     this._saving++;
+    this._inFlight.set(job.id, (this._inFlight.get(job.id) || 0) + 1);
     // One save after the other, in the order they were made.
     this._saveChain = this._saveChain.then(async () => {
       try {
@@ -272,11 +286,14 @@ class HaloSyncPanel extends HTMLElement {
         this._state = { ...this._state, presets: r.presets, active: r.active };
         // Only a confirmed copy leaves the unsaved list; after an error the draft keeps what was typed.
         if (this._unsaved.get(job.id) === job.preset) this._unsaved.delete(job.id);
-        if (!this._pending && this._saving === 1 && this._saveState === "saving") this._setSaveState("saved");
+        if (job.id === this._editId && !this._pending && this._saving === 1 && this._saveState === "saving") this._setSaveState("saved");
       } catch (e) {
-        this._setSaveState({ error: this._wsErr(e) });
+        // The save state belongs to the preset in the editor. An error of another preset shows again once it is opened (_edit).
+        if (job.id === this._editId) this._setSaveState({ error: this._wsErr(e) });
       } finally {
         this._saving--;
+        const left = this._inFlight.get(job.id) - 1;
+        if (left > 0) this._inFlight.set(job.id, left); else this._inFlight.delete(job.id);
         this._renderPresets();
       }
     });
@@ -306,7 +323,14 @@ class HaloSyncPanel extends HTMLElement {
     this._selLight = 0;
     this._confirmDelete = false;
     this._errs.editor = null;
-    if (this._saveState === "saved") this._saveState = null;
+    // The save state belongs to the preset in the editor. Changes of this preset the backend has not confirmed yet:
+    // still on their way, they show as saving; otherwise an earlier save failed and they are saved again,
+    // so its error shows again or the save goes through now.
+    this._saveState = null;
+    if (this._unsaved.has(id)) {
+      if (this._inFlight.has(id)) this._saveState = "saving";
+      else this._queueSave();
+    }
     this._renderPresets();
     this._renderEditor();
   }
@@ -352,18 +376,31 @@ class HaloSyncPanel extends HTMLElement {
   }
 
   async _delete() {
+    if (this._deleting) return; // a second click while the first delete is still on its way
+    this._deleting = true;
     // The id is taken before waiting. Pending changes are saved first: should the delete fail (last preset), nothing is lost.
     const id = this._editId;
-    await this._flushSave();
     this._confirmDelete = false;
-    await this._try("editor", async () => {
-      const r = await this._msg("delete", { preset_id: id });
-      this._unsaved.delete(id);
-      this._editId = null;
-      this._draftId = null;
-      this._saveState = null;
-      this._apply(r);
-    });
+    this._renderEditor();
+    try {
+      await this._flushSave();
+      await this._try("editor", async () => {
+        const r = await this._msg("delete", { preset_id: id });
+        this._unsaved.delete(id);
+        // Whoever opened another preset meanwhile stays there; only the deleted one makes way for the active preset.
+        if (this._editId === id) {
+          this._editId = null;
+          this._draftId = null;
+          this._saveState = null;
+        }
+        this._apply(r);
+      });
+    } finally {
+      this._deleting = false;
+      // Only the button comes back: a new render would take the focus from whoever types in another preset meanwhile.
+      const del = this.shadowRoot.getElementById("del");
+      if (del) { del.disabled = false; del.removeAttribute("disabled"); }
+    }
   }
 
   async _reset() {
@@ -462,20 +499,25 @@ class HaloSyncPanel extends HTMLElement {
     this._bindToggle(el, "lightsoff", s.lights_off_with_tv, s.lights_off_with_tv === undefined, (v) => this._setLightsOff(v));
   }
 
+  // Short facts of a preset for its tile, each with a longer explanation for the tooltip: [short, long].
   _meta(p) {
     const t = this._t, n = (v) => this._n(v);
     const parts = [];
-    if (p.source === "tv_style") parts.push(t("meta.tv_style"));
+    if (p.source === "tv_style") parts.push([t("meta.tv_style"), t("meta.tv_style_title")]);
     else {
-      parts.push(t("meta.gain", { gain: n(p.gain) }));
-      parts.push(p.smoothing_mode === "native" ? t("meta.tv_filter") : t("meta.smoothing", { color: n(p.smoothing_color), brightness: n(p.smoothing_brightness) }));
+      parts.push([t("meta.gain", { gain: n(p.gain) }), t("meta.gain_title", { gain: n(p.gain) })]);
+      const sm = { color: n(p.smoothing_color), brightness: n(p.smoothing_brightness) };
+      parts.push(p.smoothing_mode === "native" ? [t("meta.tv_filter"), t("meta.tv_filter_title")] : [t("meta.smoothing", sm), t("meta.smoothing_title", sm)]);
     }
     if (p.zone_mode && p.zone_mode !== "smooth") {
-      parts.push(p.zone_mode === "native" ? t("meta.tv_zones") : p.zone_mode === "nearest" ? t("meta.nearest") : p.zone_mode === "some" ? t("meta.some", { n: n(p.zone_count) }) : t("meta.side"));
+      const zone = p.zone_mode === "native" ? t("meta.tv_zones") : p.zone_mode === "nearest" ? t("meta.nearest") : p.zone_mode === "some" ? t("meta.some", { n: n(p.zone_count) }) : t("meta.side");
+      parts.push([zone, t("meta.zones_title", { zones: zone })]);
     }
-    parts.push(t("meta.range", { min: n(p.min_brightness), max: n(p.brightness) }));
-    if (p.extra_lights?.length) parts.push(t("meta.extra", { n: p.extra_lights.length }));
-    return parts.join(" · ");
+    const range = { min: n(p.min_brightness), max: n(p.brightness) };
+    parts.push([t("meta.range", range), t("meta.range_title", range)]);
+    const x = p.extra_lights?.length || 0;
+    if (x) parts.push([t(x === 1 ? "meta.extra_1" : "meta.extra", { n: x }), t("meta.extra_title")]);
+    return parts;
   }
 
   _renderPresets() {
@@ -488,10 +530,12 @@ class HaloSyncPanel extends HTMLElement {
       <div class="presets">${Object.entries(s.presets).map(([id, p]) => `
         <div class="preset ${id === this._editId ? "editing" : ""}" data-id="${esc(id)}"${id === this._editId ? ' aria-current="true"' : ""}>
           <div class="pname">${esc(p.name)}</div>
-          <div class="pmeta">${esc(this._meta(p))}</div>
+          <div class="pmeta">${this._meta(p).map(([short, long]) => `<span title="${esc(long)}">${esc(short)}</span>`).join(" · ")}</div>
           <div class="pact">${id === s.active
             ? `<span class="badge">${T("presets.active")}</span>`
-            : this._btn("", T("presets.activate"), "primary", 'data-act="activate"')}${this._btn("", T("presets.edit"), "tonal", 'data-act="edit"')}</div>
+            : this._btn("", T("presets.activate"), "primary", 'data-act="activate"')}${
+            /* the active tile has no Activate button: Edit is its main action, filled for contrast next to the green badge */
+            this._btn("", T("presets.edit"), id === s.active ? "primary" : "tonal", 'data-act="edit"')}</div>
         </div>`).join("")}
       </div>
       <div class="row btns">${this._btn("new", "+ " + T("presets.new"), "tonal")}</div>
@@ -546,7 +590,7 @@ class HaloSyncPanel extends HTMLElement {
       ${smoothing ? `<section class="group g-left"><h3>${T("group.smoothing")}</h3>${smoothing}</section>` : ""}
       <section class="group g-pos"><h3>${T("group.positions")}</h3>
         <div class="muted">${T("positions.hint")}</div>
-        <svg id="diagram" viewBox="-2.84 -1.6 5.69 3.2"></svg>
+        <svg id="diagram"></svg>
         <div class="row btns">${this._btn("refreshpos", T("positions.refresh"), "tonal")}</div>
       </section>
       <section class="group g-left"><h3>${T("group.extra")}</h3>
@@ -557,7 +601,7 @@ class HaloSyncPanel extends HTMLElement {
       </div>
       <div class="row btns foot">${this._btn("dup", T("editor.duplicate"), "tonal")}<span class="grow"></span>${this._confirmDelete
         ? this._btn("del-no", T("common.cancel"), "tonal") + this._btn("del-yes", T("editor.delete_confirm"), "danger")
-        : this._btn("del", T("editor.delete"), "danger-outline")}</div>
+        : this._btn("del", T("editor.delete"), "danger-outline", this._deleting ? "disabled" : "")}</div>
       <div class="err" id="err-editor" role="alert">${esc(this._errs.editor || "")}</div>`;
 
     el.querySelector("#pname").oninput = (e) => { d.name = e.target.value; this._queueSave(); };
@@ -586,6 +630,7 @@ class HaloSyncPanel extends HTMLElement {
       el.querySelector("#del-yes").onclick = () => this._delete();
     } else {
       el.querySelector("#del").onclick = () => {
+        if (this._deleting) return;
         this._confirmDelete = true;
         this._errs.editor = null;
         this._renderEditor();
@@ -671,7 +716,9 @@ class HaloSyncPanel extends HTMLElement {
     const d = this._draft;
     const chans = this._state.hue_channels || [];
     const A = 16 / 9; // TVs are wide: x in -1..1 spans the screen width, z in -1..1 its height
-    svg.setAttribute("viewBox", `${-1.6 * A} -1.6 ${3.2 * A} 3.2`);
+    // Other lights can be placed up to 1.5 out; the margin beyond keeps their marker (and its outline) inside the frame.
+    const [W, H] = [1.5 * A + 0.2, 1.75];
+    svg.setAttribute("viewBox", `${-W} ${-H} ${2 * W} ${2 * H}`);
     // SVG y grows downward; Hue/our z grows upward.
     svg.innerHTML = `
       <rect x="${-A}" y="-1" width="${2 * A}" height="2" rx="0.05" class="tv"/>
@@ -753,7 +800,8 @@ const NARROW = `
 const CSS = `
   :host { display:block; background: var(--primary-background-color); min-height:100vh; color: var(--primary-text-color);
     font-family: var(--ha-font-family-body, var(--paper-font-body1_-_font-family, Roboto, sans-serif)); font-size:14px; line-height:1.45; }
-  .toolbar { display:flex; align-items:center; height:56px; padding:0 8px; background: var(--app-header-background-color, var(--primary-color)); color: var(--app-header-text-color, #fff); }
+  /* stays on top while scrolling like the Home Assistant header; the sticky diagram sits below it (56px + 16px) */
+  .toolbar { position:sticky; top:0; z-index:3; box-sizing:border-box; display:flex; align-items:center; height:56px; padding:0 8px; background: var(--app-header-background-color, var(--primary-color)); color: var(--app-header-text-color, #fff); }
   .title { font-size:20px; margin-left:8px; }
   .loaderr { padding:24px; }
   .wrap { max-width:1100px; margin:0 auto; padding:16px; display:grid; grid-template-columns: minmax(0,1fr); gap:16px; container-type: inline-size; box-sizing:border-box; }
@@ -834,6 +882,7 @@ const CSS = `
   .preset.editing { border-color: var(--primary-color); box-shadow: inset 0 0 0 1px var(--primary-color); }
   .pname { font-weight:500; font-size:16px; min-width:0; overflow-wrap:anywhere; }
   .pmeta { font-size:12px; color: var(--secondary-text-color); }
+  .pmeta span[title] { cursor:help; }
   .pact { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-top:auto; padding-top:6px; }
   /* "Active" stands where the other tiles have their Activate button, at the same height */
   .badge { flex:none; display:inline-flex; align-items:center; gap:6px; min-height:36px; box-sizing:border-box; padding:0 14px; border-radius:18px;
@@ -844,7 +893,9 @@ const CSS = `
   .foot { border-top:1px solid var(--divider-color); padding-top:12px; margin-top:16px; }
 
   /* positions */
-  svg { display:block; width:100%; max-width:560px; aspect-ratio:16 / 9; margin:8px auto 0; background: var(--secondary-background-color); border-radius:12px; cursor:crosshair; }
+  /* height from the viewBox; the frame shows the whole area a light can be placed in */
+  svg { display:block; width:100%; height:auto; max-width:560px; margin:8px auto 0; box-sizing:border-box; background: var(--secondary-background-color);
+    border:1px solid var(--divider-color); border-radius:12px; cursor:crosshair; }
   svg .tv { fill: var(--primary-text-color); fill-opacity:.08; stroke: var(--secondary-text-color); stroke-width:0.02; }
   svg .tvlabel { fill: var(--secondary-text-color); font-size:0.22px; text-anchor:middle; }
   svg .hue { fill: var(--primary-color); }
@@ -857,10 +908,11 @@ const CSS = `
   .xrow.sel { border-color: var(--primary-color); box-shadow: inset 0 0 0 1px var(--primary-color); }
   .xtop { display:flex; align-items:center; gap:8px; min-width:0; }
   .xtop select { flex:1 1 auto; width:100%; min-width:0; }
-  .xnums { display:grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap:8px 12px; margin-top:8px; align-items:end; }
+  /* the numbers end where the light dropdown ends: room on the right for the remove button (32px + 8px gap) */
+  .xnums { display:grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap:8px 12px; margin:8px 40px 0 0; align-items:end; }
   .xf { display:flex; flex-direction:column; gap:4px; min-width:0; font-size:12px; color: var(--secondary-text-color); cursor:pointer; }
   .xf span { overflow-wrap:anywhere; }
-  .xf input { width:100%; padding:6px 8px; }
+  .xf input { width:100%; }
   .xdel { font: inherit; width:32px; height:32px; flex:none; border:none; border-radius:50%; background:transparent; color: var(--secondary-text-color); cursor:pointer; }
   .xdel:hover { background: rgba(127,127,127,.12); color: var(--error-color, #db4437); }
   .xdel:focus-visible { outline:2px solid var(--primary-color); }
@@ -881,7 +933,8 @@ const CSS = `
   @container (min-width: 900px) {
     .egrid { display:grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); column-gap:32px; align-items:start; }
     .egrid > .g-left { grid-column:1; }
-    .egrid > .g-pos { grid-column:2; grid-row: 1 / span 5; position:sticky; top:16px; }
+    /* below the sticky toolbar (56px) with 16px space; no ancestor inside the panel sets overflow, which would stop sticky */
+    .egrid > .g-pos { grid-column:2; grid-row: 1 / span 5; position:sticky; top:72px; }
     .g-pos svg { max-width:none; }
   }
   @container (max-width: 600px) { ${NARROW} }
