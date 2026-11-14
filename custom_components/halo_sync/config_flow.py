@@ -1,15 +1,21 @@
-"""Config flow: pair with the TV (PIN), link the Hue bridge (button), pick the entertainment area."""
+"""Config flow: pair with the TV (PIN), link the Hue bridge (button), pick the entertainment area.
+
+Also: reconfigure (new addresses or area; a new address is paired again where needed), reauth (new TV PIN
+or Hue key) and options.
+"""
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from typing import Any
 
 import requests
 import voluptuous as vol
 
 from homeassistant.components import zeroconf as ha_zeroconf
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
+from homeassistant.config_entries import ConfigEntry, ConfigFlow, ConfigFlowResult, OptionsFlow
+from homeassistant.core import callback
 from homeassistant.helpers.selector import SelectOptionDict, SelectSelector, SelectSelectorConfig, SelectSelectorMode
 
 from . import api, discovery
@@ -20,10 +26,13 @@ from .const import (
     CONF_HUE_CLIENTKEY,
     CONF_HUE_HOST,
     CONF_HUE_USER,
+    CONF_TV_ENDPOINT,
     CONF_TV_HOST,
     CONF_TV_PASS,
     CONF_TV_USER,
     DOMAIN,
+    TV_ENDPOINT,
+    TV_ENDPOINTS,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -32,6 +41,11 @@ MANUAL = "manual"
 CONF_TV_CHOICE = "tv_choice"
 CONF_HUE_CHOICE = "hue_choice"
 CONF_RESCAN = "rescan"
+# Set by the manager in the reauth data: which pairing the device rejected ("tv" or "hue").
+REAUTH_TARGET = "reauth_target"
+
+# Anything a bad or unexpected bridge answer can raise; the flow shows an error instead of failing.
+_HUE_ERRORS = (api.ApiError, requests.RequestException, KeyError, ValueError, TypeError)
 
 
 class AmbiHueConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -43,6 +57,11 @@ class AmbiHueConfigFlow(ConfigFlow, domain=DOMAIN):
         self._areas: dict[str, str] = {}
         self._found: dict[str, list[dict]] | None = None  # autodiscovered devices, filled on first display
         self._last: dict[str, Any] = {}  # what the user entered last, to refill the form after an error
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry: ConfigEntry) -> HaloSyncOptionsFlow:
+        return HaloSyncOptionsFlow()
 
     async def _discover(self) -> None:
         try:
@@ -59,8 +78,75 @@ class AmbiHueConfigFlow(ConfigFlow, domain=DOMAIN):
         choice = user_input.get(choice_key)
         return manual or ("" if choice in (None, MANUAL) else str(choice))
 
+    # ---- shared steps of setup, reconfigure and reauth ---------------------------------------
+    async def _pair_request(self) -> str | None:
+        """Ask the TV to show a new PIN. Returns an error key, or None on success."""
+        try:
+            self._pairing = await self.hass.async_add_executor_job(api.tv_pair_request, self._data[CONF_TV_HOST])
+        except (api.ApiError, requests.RequestException) as exc:
+            _LOGGER.warning("TV pairing request failed: %s", exc)
+            self._pairing = None
+            return "tv_unreachable"
+        return None
+
+    async def _pair_grant(self, pin: str) -> str | None:
+        """Finish the pairing with the PIN. A wrong or expired PIN requests a new one right away."""
+        if self._pairing is None:  # the last pairing request failed, so there is nothing to grant
+            return await self._pair_request() or "bad_pin"
+        try:
+            user, password = await self.hass.async_add_executor_job(
+                api.tv_pair_grant, self._data[CONF_TV_HOST], self._pairing, pin
+            )
+        except (api.ApiError, requests.RequestException) as exc:
+            _LOGGER.warning("TV pairing grant failed: %s", exc)
+            return await self._pair_request() or "bad_pin"
+        self._data[CONF_TV_USER], self._data[CONF_TV_PASS] = user, password
+        return None
+
+    async def _hue_register(self) -> str | None:
+        """Create a new Hue application key. Returns an error key, or None on success."""
+        try:
+            key = await self.hass.async_add_executor_job(api.hue_register, self._data[CONF_HUE_HOST])
+        except _HUE_ERRORS as exc:
+            _LOGGER.warning("Hue registration failed: %s", exc)
+            return "hue_unreachable"
+        if key is None:
+            return "link_button"
+        self._data[CONF_HUE_USER] = key["username"]
+        self._data[CONF_HUE_CLIENTKEY] = key["clientkey"]
+        self._data[CONF_HUE_APPID] = key["appid"]
+        return None
+
+    async def _load_areas(self) -> str | None:
+        """Read the entertainment areas into self._areas. Returns an error key, or None when there is one."""
+        try:
+            self._areas = await self.hass.async_add_executor_job(
+                api.hue_entertainment_areas, self._data[CONF_HUE_HOST], self._data[CONF_HUE_USER]
+            )
+        except api.HueAuthError as exc:
+            _LOGGER.warning("The Hue bridge rejected the application key: %s", exc)
+            self._areas = {}
+            return "hue_auth"
+        except _HUE_ERRORS as exc:
+            _LOGGER.warning("Reading the Hue entertainment areas failed: %s", exc)
+            self._areas = {}
+            return "hue_unreachable"
+        return None if self._areas else "no_areas"
+
+    def _area_form(self, step_id: str, default: str | None = None, error: str | None = None) -> ConfigFlowResult:
+        """The area choice (areas from _load_areas). With an error: a form without fields, submitting checks again."""
+        if error:
+            return self.async_show_form(step_id=step_id, data_schema=vol.Schema({}), errors={"base": error})
+        if default in self._areas:
+            field = vol.Required(CONF_ENT_ID, default=default)
+        else:
+            field = vol.Required(CONF_ENT_ID)
+        return self.async_show_form(step_id=step_id, data_schema=vol.Schema({field: vol.In(self._areas)}))
+
+    # ---- setup ------------------------------------------------------------------------------
     async def async_step_user(self, user_input=None) -> ConfigFlowResult:
         errors = {}
+        language = self.hass.config.language
         if user_input is not None:
             self._last = dict(user_input)
             if user_input.get(CONF_RESCAN):
@@ -74,13 +160,10 @@ class AmbiHueConfigFlow(ConfigFlow, domain=DOMAIN):
                     errors["base"] = "no_bridge"
                 else:
                     self._data.update({CONF_TV_HOST: tv, CONF_HUE_HOST: hue, CONF_ADB: user_input.get(CONF_ADB, False)})
-                    try:
-                        self._pairing = await self.hass.async_add_executor_job(api.tv_pair_request, tv)
-                    except (api.ApiError, requests.RequestException) as exc:
-                        _LOGGER.warning("TV pairing request failed: %s", exc)
-                        errors["base"] = "tv_unreachable"
-                    else:
+                    error = await self._pair_request()
+                    if error is None:
                         return await self.async_step_tv_pin()
+                    errors["base"] = error
         if self._found is None:
             await self._discover()
         tvs, bridges = self._found["tvs"], self._found["bridges"]
@@ -89,7 +172,7 @@ class AmbiHueConfigFlow(ConfigFlow, domain=DOMAIN):
 
         def selector(devices: list[dict], label) -> SelectSelector:
             options = [SelectOptionDict(value=d["host"], label=label(d)) for d in devices]
-            options.append(SelectOptionDict(value=MANUAL, label="Enter the address manually (below)"))
+            options.append(SelectOptionDict(value=MANUAL, label=discovery.translate(language, "manual")))
             return SelectSelector(SelectSelectorConfig(options=options, mode=SelectSelectorMode.LIST))
 
         def default(devices: list[dict], key: str) -> str:
@@ -110,54 +193,234 @@ class AmbiHueConfigFlow(ConfigFlow, domain=DOMAIN):
                     vol.Optional(CONF_RESCAN, default=False): bool,
                 }
             ),
-            description_placeholders={"tv_table": discovery.tv_table(tvs), "bridge_table": discovery.bridge_table(bridges)},
+            description_placeholders={
+                "tv_table": discovery.tv_table(tvs, language),
+                "bridge_table": discovery.bridge_table(bridges, language),
+            },
             errors=errors,
         )
 
     async def async_step_tv_pin(self, user_input=None) -> ConfigFlowResult:
         errors = {}
         if user_input is not None:
-            try:
-                user, password = await self.hass.async_add_executor_job(
-                    api.tv_pair_grant, self._data[CONF_TV_HOST], self._pairing, user_input["pin"].strip()
-                )
-            except (api.ApiError, requests.RequestException) as exc:
-                _LOGGER.warning("TV pairing grant failed: %s", exc)
-                errors["base"] = "bad_pin"
-            else:
-                self._data[CONF_TV_USER], self._data[CONF_TV_PASS] = user, password
+            error = await self._pair_grant(user_input["pin"].strip())
+            if error is None:
                 return await self.async_step_hue_link()
+            errors["base"] = error
         return self.async_show_form(step_id="tv_pin", data_schema=vol.Schema({vol.Required("pin"): str}), errors=errors)
 
     async def async_step_hue_link(self, user_input=None) -> ConfigFlowResult:
         errors = {}
         if user_input is not None:
-            try:
-                key = await self.hass.async_add_executor_job(api.hue_register, self._data[CONF_HUE_HOST])
-            except (api.ApiError, requests.RequestException) as exc:
-                _LOGGER.warning("Hue registration failed: %s", exc)
-                errors["base"] = "hue_unreachable"
-            else:
-                if key is None:
-                    errors["base"] = "link_button"
-                else:
-                    self._data[CONF_HUE_USER] = key["username"]
-                    self._data[CONF_HUE_CLIENTKEY] = key["clientkey"]
-                    self._data[CONF_HUE_APPID] = key["appid"]
-                    return await self.async_step_area()
+            error = await self._hue_register()
+            if error is None:
+                return await self.async_step_area()
+            errors["base"] = error
         return self.async_show_form(step_id="hue_link", data_schema=vol.Schema({}), errors=errors)
 
     async def async_step_area(self, user_input=None) -> ConfigFlowResult:
-        if user_input is not None:
+        if user_input and user_input.get(CONF_ENT_ID) in self._areas:
             self._data[CONF_ENT_ID] = user_input[CONF_ENT_ID]
             await self.async_set_unique_id(f"{self._data[CONF_TV_HOST]}_{user_input[CONF_ENT_ID]}")
             self._abort_if_unique_id_configured()
             return self.async_create_entry(title=f"Halo Sync: {self._areas[user_input[CONF_ENT_ID]]}", data=self._data)
-        self._areas = await self.hass.async_add_executor_job(
-            api.hue_entertainment_areas, self._data[CONF_HUE_HOST], self._data[CONF_HUE_USER]
-        )
-        if not self._areas:
-            return self.async_abort(reason="no_areas")
+        error = await self._load_areas()
+        if error == "hue_auth":
+            # Checking again would send the same rejected key; only a new key (link button) helps.
+            return self.async_show_form(step_id="hue_link", data_schema=vol.Schema({}), errors={"base": error})
+        return self._area_form("area", error=error)
+
+    # ---- reconfigure: new addresses or area, the unique ID stays ---------------------------------
+    # A changed TV address is checked with the stored pairing and paired again if that TV rejects it.
+    # A changed bridge address always gets a new key (link button): the stored key is never sent to it.
+    async def async_step_reconfigure(self, user_input=None) -> ConfigFlowResult:
+        entry = self._get_reconfigure_entry()
+        errors = {}
+        if user_input is not None:
+            tv = (user_input.get(CONF_TV_HOST) or "").strip()
+            hue = (user_input.get(CONF_HUE_HOST) or "").strip()
+            self._data = {**entry.data, CONF_TV_HOST: tv, CONF_HUE_HOST: hue}
+            self._pairing = None
+            if not tv:
+                errors["base"] = "no_tv"
+            elif not hue:
+                errors["base"] = "no_bridge"
+            else:
+                error = None
+                if tv != entry.data.get(CONF_TV_HOST):  # an unchanged TV may be off, that must not block
+                    try:
+                        await self.hass.async_add_executor_job(
+                            api.tv_check_auth, tv, entry.data[CONF_TV_USER], entry.data[CONF_TV_PASS]
+                        )
+                    except api.TvAuthError as exc:
+                        _LOGGER.warning("The TV at the new address rejected the stored pairing: %s", exc)
+                        return self.async_show_form(
+                            step_id="reconfigure_tv", data_schema=vol.Schema({}), errors={"base": "tv_auth"}
+                        )
+                    except (api.ApiError, requests.RequestException) as exc:
+                        _LOGGER.warning("TV check failed: %s", exc)
+                        error = "tv_unreachable"
+                if error is None:
+                    if self._hue_host_changed():
+                        return await self.async_step_reconfigure_hue_link()
+                    error = await self._load_areas()
+                    if error is None:
+                        return self._area_form("reconfigure_area", default=entry.data.get(CONF_ENT_ID))
+                    if error == "hue_auth":
+                        return self._reconfigure_hue_link_form("hue_auth")
+                errors["base"] = error
+        shown = user_input or entry.data
         return self.async_show_form(
-            step_id="area", data_schema=vol.Schema({vol.Required(CONF_ENT_ID): vol.In(self._areas)})
+            step_id="reconfigure",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_TV_HOST, default=shown.get(CONF_TV_HOST, "")): str,
+                    vol.Required(CONF_HUE_HOST, default=shown.get(CONF_HUE_HOST, "")): str,
+                }
+            ),
+            errors=errors,
+        )
+
+    def _hue_host_changed(self) -> bool:
+        return self._data[CONF_HUE_HOST] != self._get_reconfigure_entry().data.get(CONF_HUE_HOST)
+
+    async def async_step_reconfigure_tv(self, user_input=None) -> ConfigFlowResult:
+        """The TV at the new address rejects the stored pairing: pair it there (confirm first, then the PIN)."""
+        errors = {}
+        if user_input is not None:
+            error = await self._pair_request()  # self._data holds the new TV address
+            if error is None:
+                return await self.async_step_reconfigure_tv_pin()
+            errors["base"] = error
+        return self.async_show_form(step_id="reconfigure_tv", data_schema=vol.Schema({}), errors=errors)
+
+    async def async_step_reconfigure_tv_pin(self, user_input=None) -> ConfigFlowResult:
+        errors = {}
+        if user_input is not None:
+            error = await self._pair_grant(user_input["pin"].strip())
+            if error is None:
+                if self._hue_host_changed():
+                    return await self.async_step_reconfigure_hue_link()
+                return await self.async_step_reconfigure_area()
+            errors["base"] = error
+        return self.async_show_form(
+            step_id="reconfigure_tv_pin", data_schema=vol.Schema({vol.Required("pin"): str}), errors=errors
+        )
+
+    def _reconfigure_hue_link_form(self, error: str | None = None) -> ConfigFlowResult:
+        return self.async_show_form(
+            step_id="reconfigure_hue_link", data_schema=vol.Schema({}), errors={"base": error} if error else {}
+        )
+
+    async def async_step_reconfigure_hue_link(self, user_input=None) -> ConfigFlowResult:
+        """A new key from the bridge (new address, or the stored key was rejected)."""
+        if user_input is not None:
+            error = await self._hue_register()  # self._data holds the new bridge address
+            if error is None:
+                return await self.async_step_reconfigure_area()
+            return self._reconfigure_hue_link_form(error)
+        return self._reconfigure_hue_link_form()
+
+    async def async_step_reconfigure_area(self, user_input=None) -> ConfigFlowResult:
+        entry = self._get_reconfigure_entry()
+        if user_input and user_input.get(CONF_ENT_ID) in self._areas:
+            ent_id = user_input[CONF_ENT_ID]
+            changes: dict[str, Any] = {}
+            if ent_id != entry.data.get(CONF_ENT_ID):  # the title names the area; a kept area keeps a renamed title
+                changes["title"] = f"Halo Sync: {self._areas[ent_id]}"
+            updates = {CONF_TV_HOST: self._data[CONF_TV_HOST], CONF_HUE_HOST: self._data[CONF_HUE_HOST], CONF_ENT_ID: ent_id}
+            # New TV pairing or Hue key from this flow; unchanged ones are the stored values.
+            for key in (CONF_TV_USER, CONF_TV_PASS, CONF_HUE_USER, CONF_HUE_CLIENTKEY, CONF_HUE_APPID):
+                if key in self._data:
+                    updates[key] = self._data[key]
+            return self.async_update_reload_and_abort(
+                entry, data_updates=updates, reason="reconfigure_successful", **changes
+            )
+        error = await self._load_areas()
+        if error == "hue_auth":
+            return self._reconfigure_hue_link_form(error)
+        return self._area_form("reconfigure_area", default=entry.data.get(CONF_ENT_ID), error=error)
+
+    # ---- reauth: the TV or the bridge rejected the stored pairing ------------------------------
+    async def async_step_reauth(self, entry_data: Mapping[str, Any]) -> ConfigFlowResult:
+        self._data = dict(self._get_reauth_entry().data)
+        target = entry_data.get(REAUTH_TARGET)
+        if target == "tv":
+            return await self.async_step_reauth_tv()
+        if target == "hue":
+            return await self.async_step_reauth_hue_link()
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(self, user_input=None) -> ConfigFlowResult:
+        """No target given: offer both. A menu step needs its own method, Home Assistant checks for it."""
+        return self.async_show_menu(step_id="reauth_confirm", menu_options=["reauth_tv", "reauth_hue_link"])
+
+    async def async_step_reauth_tv(self, user_input=None) -> ConfigFlowResult:
+        """Confirm first: the reauth flow starts in the background, a PIN shown then would expire unseen."""
+        errors = {}
+        if user_input is not None:
+            error = await self._pair_request()
+            if error is None:
+                return await self.async_step_reauth_tv_pin()
+            errors["base"] = error
+        return self.async_show_form(step_id="reauth_tv", data_schema=vol.Schema({}), errors=errors)
+
+    async def async_step_reauth_tv_pin(self, user_input=None) -> ConfigFlowResult:
+        errors = {}
+        if user_input is not None:
+            error = await self._pair_grant(user_input["pin"].strip())
+            if error is None:
+                return self.async_update_reload_and_abort(
+                    self._get_reauth_entry(),
+                    data_updates={CONF_TV_USER: self._data[CONF_TV_USER], CONF_TV_PASS: self._data[CONF_TV_PASS]},
+                    reason="reauth_successful",
+                )
+            errors["base"] = error
+        return self.async_show_form(
+            step_id="reauth_tv_pin", data_schema=vol.Schema({vol.Required("pin"): str}), errors=errors
+        )
+
+    async def async_step_reauth_hue_link(self, user_input=None) -> ConfigFlowResult:
+        errors = {}
+        if user_input is not None:
+            error = await self._hue_register()
+            if error is None:
+                return self.async_update_reload_and_abort(
+                    self._get_reauth_entry(),
+                    data_updates={
+                        CONF_HUE_USER: self._data[CONF_HUE_USER],
+                        CONF_HUE_CLIENTKEY: self._data[CONF_HUE_CLIENTKEY],
+                        CONF_HUE_APPID: self._data[CONF_HUE_APPID],
+                    },
+                    reason="reauth_successful",
+                )
+            errors["base"] = error
+        return self.async_show_form(step_id="reauth_hue_link", data_schema=vol.Schema({}), errors=errors)
+
+
+class HaloSyncOptionsFlow(OptionsFlow):
+    """ADB source sensor and the TV's Ambilight endpoint. Saving reloads the entry (listener in __init__.py)."""
+
+    async def async_step_init(self, user_input=None) -> ConfigFlowResult:
+        entry = self.config_entry
+        if user_input is not None:
+            return self.async_create_entry(data={**entry.options, **user_input})
+        adb = entry.options.get(CONF_ADB, entry.data.get(CONF_ADB, False))
+        endpoint = entry.options.get(CONF_TV_ENDPOINT, TV_ENDPOINT)
+        if endpoint not in TV_ENDPOINTS:
+            endpoint = TV_ENDPOINT
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_ADB, default=bool(adb)): bool,
+                    vol.Required(CONF_TV_ENDPOINT, default=endpoint): SelectSelector(
+                        SelectSelectorConfig(
+                            options=list(TV_ENDPOINTS),
+                            translation_key=CONF_TV_ENDPOINT,
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
+                }
+            ),
         )

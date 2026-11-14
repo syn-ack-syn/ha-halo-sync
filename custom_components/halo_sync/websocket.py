@@ -17,6 +17,14 @@ def _manager(hass: HomeAssistant, entry_id: str | None):
     return entries[0].runtime_data if entries else None
 
 
+def _require_manager(hass: HomeAssistant, connection, msg):
+    """The manager for the message, or None after sending the not_found error."""
+    mgr = _manager(hass, msg.get("entry_id"))
+    if not mgr:
+        connection.send_error(msg["id"], "not_found", "Halo Sync is not configured")
+    return mgr
+
+
 def _lights(hass: HomeAssistant) -> list[dict]:
     return sorted(
         ({"entity_id": s.entity_id, "name": s.attributes.get("friendly_name", s.entity_id)} for s in hass.states.async_all("light")),
@@ -38,9 +46,9 @@ def _reply(hass, connection, msg, mgr):
 @websocket_api.require_admin
 @websocket_api.async_response
 async def ws_get(hass, connection, msg):
-    mgr = _manager(hass, msg.get("entry_id"))
+    mgr = _require_manager(hass, connection, msg)
     if not mgr:
-        return connection.send_error(msg["id"], "not_found", "Halo Sync is not configured")
+        return
     if not mgr.hue_channels:
         await mgr.async_refresh_channels()
     _reply(hass, connection, msg, mgr)
@@ -54,9 +62,9 @@ async def ws_get(hass, connection, msg):
 def ws_subscribe(hass, connection, msg):
     from homeassistant.helpers.dispatcher import async_dispatcher_connect
 
-    mgr = _manager(hass, msg.get("entry_id"))
+    mgr = _require_manager(hass, connection, msg)
     if not mgr:
-        return connection.send_error(msg["id"], "not_found", "Halo Sync is not configured")
+        return
 
     @callback
     def forward() -> None:
@@ -72,11 +80,13 @@ def ws_subscribe(hass, connection, msg):
 @websocket_api.require_admin
 @callback
 def ws_activate(hass, connection, msg):
-    mgr = _manager(hass, msg.get("entry_id"))
+    mgr = _require_manager(hass, connection, msg)
+    if not mgr:
+        return
     try:
         mgr.activate(msg["preset"])
-    except (KeyError, AttributeError):
-        return connection.send_error(msg["id"], "not_found", "unknown preset")
+    except KeyError:
+        return connection.send_error(msg["id"], "unknown_preset", "unknown preset")
     _reply(hass, connection, msg, mgr)
 
 
@@ -91,8 +101,13 @@ def ws_activate(hass, connection, msg):
 @websocket_api.require_admin
 @callback
 def ws_save(hass, connection, msg):
-    mgr = _manager(hass, msg.get("entry_id"))
-    pid = mgr.save_preset(msg.get("preset_id"), msg["preset"])
+    mgr = _require_manager(hass, connection, msg)
+    if not mgr:
+        return
+    try:
+        pid = mgr.save_preset(msg.get("preset_id"), msg["preset"])
+    except ValueError as exc:
+        return connection.send_error(msg["id"], str(exc), str(exc))
     connection.send_result(msg["id"], {"preset_id": pid, **mgr.status(), "lights": _lights(hass)})
 
 
@@ -102,11 +117,13 @@ def ws_save(hass, connection, msg):
 @websocket_api.require_admin
 @callback
 def ws_delete(hass, connection, msg):
-    mgr = _manager(hass, msg.get("entry_id"))
+    mgr = _require_manager(hass, connection, msg)
+    if not mgr:
+        return
     try:
         mgr.delete_preset(msg["preset_id"])
     except ValueError as exc:
-        return connection.send_error(msg["id"], "invalid", str(exc))
+        return connection.send_error(msg["id"], str(exc), str(exc))
     _reply(hass, connection, msg, mgr)
 
 
@@ -114,7 +131,9 @@ def ws_delete(hass, connection, msg):
 @websocket_api.require_admin
 @websocket_api.async_response
 async def ws_refresh_positions(hass, connection, msg):
-    mgr = _manager(hass, msg.get("entry_id"))
+    mgr = _require_manager(hass, connection, msg)
+    if not mgr:
+        return
     await mgr.async_refresh_channels()
     _reply(hass, connection, msg, mgr)
 
@@ -123,7 +142,9 @@ async def ws_refresh_positions(hass, connection, msg):
 @websocket_api.require_admin
 @callback
 def ws_reset(hass, connection, msg):
-    mgr = _manager(hass, msg.get("entry_id"))
+    mgr = _require_manager(hass, connection, msg)
+    if not mgr:
+        return
     mgr.reset_defaults()
     _reply(hass, connection, msg, mgr)
 
@@ -134,7 +155,9 @@ def ws_reset(hass, connection, msg):
 @websocket_api.require_admin
 @websocket_api.async_response
 async def ws_run(hass, connection, msg):
-    mgr = _manager(hass, msg.get("entry_id"))
+    mgr = _require_manager(hass, connection, msg)
+    if not mgr:
+        return
     await (mgr.async_start() if msg["running"] else mgr.async_stop())
     _reply(hass, connection, msg, mgr)
 
@@ -145,7 +168,9 @@ async def ws_run(hass, connection, msg):
 @websocket_api.require_admin
 @websocket_api.async_response
 async def ws_auto_resume(hass, connection, msg):
-    mgr = _manager(hass, msg.get("entry_id"))
+    mgr = _require_manager(hass, connection, msg)
+    if not mgr:
+        return
     await mgr.async_set_auto_resume(msg["enabled"])
     _reply(hass, connection, msg, mgr)
 
@@ -156,7 +181,9 @@ async def ws_auto_resume(hass, connection, msg):
 @websocket_api.require_admin
 @websocket_api.async_response
 async def ws_lights_off_with_tv(hass, connection, msg):
-    mgr = _manager(hass, msg.get("entry_id"))
+    mgr = _require_manager(hass, connection, msg)
+    if not mgr:
+        return
     await mgr.async_set_lights_off_with_tv(msg["enabled"])
     _reply(hass, connection, msg, mgr)
 
@@ -171,9 +198,9 @@ async def ws_lights_off_with_tv(hass, connection, msg):
 @websocket_api.require_admin
 @websocket_api.async_response
 async def ws_connection_test(hass, connection, msg):
-    mgr = _manager(hass, msg.get("entry_id"))
+    mgr = _require_manager(hass, connection, msg)
     if not mgr:
-        return connection.send_error(msg["id"], "not_found", "Halo Sync is not configured")
+        return
     if mgr._nettest_lock.locked():
         return connection.send_error(msg["id"], "busy", "A connection test is already running")
     try:

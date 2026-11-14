@@ -1,0 +1,176 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Halo Sync",
+        "description": "Wähle den Philips-Fernseher und die Hue Bridge aus. Im Netzwerk gefundene Geräte (schalte den Fernseher vorher ein):\n\n**Fernseher**\n\n{tv_table}\n\n**Hue Bridges**\n\n{bridge_table}\n\nWähle unten ein Gerät aus oder gib eine Adresse ein (eine eingegebene Adresse hat Vorrang vor der Auswahl). Android- und Google-TV-Geräte werden unterstützt, TitanOS-Fernseher sind ungetestet. Nach dem Absenden erscheint eine PIN auf dem Fernseher.",
+        "data": {
+          "tv_choice": "Fernseher",
+          "tv_host": "IP-Adresse des Fernsehers (optional, hat Vorrang vor der Auswahl)",
+          "hue_choice": "Hue Bridge",
+          "hue_host": "IP-Adresse der Hue Bridge (optional, hat Vorrang vor der Auswahl)",
+          "adb_source": "Sensor für die TV-Quelle über ADB (der Fernseher fragt einmal, ob Debugging erlaubt werden soll)",
+          "rescan": "Netzwerk erneut durchsuchen (anhaken und absenden)"
+        }
+      },
+      "tv_pin": {
+        "title": "Fernseher koppeln",
+        "description": "Gib die PIN ein, die auf dem Fernseher angezeigt wird.",
+        "data": {
+          "pin": "PIN"
+        }
+      },
+      "hue_link": {
+        "title": "Hue Bridge",
+        "description": "Drücke die Link-Taste auf der Hue Bridge und sende das Formular innerhalb von 30 Sekunden ab."
+      },
+      "area": {
+        "title": "Entertainment-Bereich",
+        "data": {
+          "entertainment_id": "Entertainment-Bereich"
+        },
+        "description": "Wähle den Hue-Entertainment-Bereich, an den die Farben des Fernsehers gesendet werden."
+      },
+      "reconfigure": {
+        "title": "Adressen ändern",
+        "description": "Ändere die Adresse des Fernsehers oder der Hue Bridge, zum Beispiel wenn der Router ihnen eine neue IP-Adresse gegeben hat. Deine Presets bleiben erhalten. Eine neue Bridge-Adresse wird mit der Link-Taste neu verbunden. Akzeptiert der Fernseher unter einer neuen Adresse die gespeicherte Kopplung nicht, koppelst du ihn mit einer PIN neu. Danach kannst du den Entertainment-Bereich wählen.",
+        "data": {
+          "tv_host": "IP-Adresse des Fernsehers",
+          "hue_host": "IP-Adresse der Hue Bridge"
+        }
+      },
+      "reconfigure_tv": {
+        "title": "Fernseher unter der neuen Adresse koppeln",
+        "description": "Schalte den Fernseher ein und sende das Formular ab. Danach erscheint eine PIN auf dem Fernseher."
+      },
+      "reconfigure_tv_pin": {
+        "title": "Fernseher koppeln",
+        "description": "Gib die PIN ein, die auf dem Fernseher angezeigt wird.",
+        "data": {
+          "pin": "PIN"
+        }
+      },
+      "reconfigure_hue_link": {
+        "title": "Hue Bridge verbinden",
+        "description": "Drücke die Link-Taste auf der Hue Bridge und sende das Formular innerhalb von 30 Sekunden ab. Die Bridge gibt Halo Sync dann einen neuen Schlüssel."
+      },
+      "reconfigure_area": {
+        "title": "Entertainment-Bereich",
+        "description": "Wähle den Hue-Entertainment-Bereich, an den die Farben des Fernsehers gesendet werden.",
+        "data": {
+          "entertainment_id": "Entertainment-Bereich"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Erneut koppeln",
+        "description": "Der Fernseher oder die Hue Bridge akzeptiert die gespeicherte Kopplung nicht mehr. Wähle aus, was erneut gekoppelt werden soll.",
+        "menu_options": {
+          "reauth_tv": "Fernseher (neue PIN)",
+          "reauth_hue_link": "Hue Bridge (Link-Taste)"
+        }
+      },
+      "reauth_tv": {
+        "title": "Fernseher erneut koppeln",
+        "description": "Der Fernseher akzeptiert die gespeicherte Kopplung nicht mehr, zum Beispiel nach einem Zurücksetzen. Schalte den Fernseher ein und sende das Formular ab. Danach erscheint eine PIN auf dem Fernseher."
+      },
+      "reauth_tv_pin": {
+        "title": "Fernseher koppeln",
+        "description": "Gib die PIN ein, die auf dem Fernseher angezeigt wird.",
+        "data": {
+          "pin": "PIN"
+        }
+      },
+      "reauth_hue_link": {
+        "title": "Hue Bridge erneut verbinden",
+        "description": "Die Hue Bridge akzeptiert den gespeicherten Schlüssel nicht mehr. Drücke die Link-Taste auf der Bridge und sende das Formular innerhalb von 30 Sekunden ab."
+      }
+    },
+    "error": {
+      "tv_unreachable": "Der Fernseher ist nicht erreichbar oder die Kopplung konnte nicht gestartet werden.",
+      "bad_pin": "Falsche oder abgelaufene PIN. Auf dem Fernseher wird jetzt eine neue PIN angezeigt.",
+      "hue_unreachable": "Die Hue Bridge ist nicht erreichbar.",
+      "link_button": "Die Link-Taste wurde nicht gedrückt. Drücke sie und sende das Formular erneut ab.",
+      "no_tv": "Wähle einen Fernseher aus der Liste oder gib seine IP-Adresse ein.",
+      "no_bridge": "Wähle eine Hue Bridge aus der Liste oder gib ihre IP-Adresse ein.",
+      "no_areas": "Die Bridge hat keine Entertainment-Bereiche. Lege in der Hue-App einen an und sende das Formular dann erneut ab.",
+      "tv_auth": "Der Fernseher unter dieser Adresse akzeptiert die gespeicherte Kopplung nicht. Sende das Formular ab, um ihn neu zu koppeln.",
+      "hue_auth": "Die Hue Bridge akzeptiert den Schlüssel nicht. Drücke die Link-Taste auf der Bridge erneut und sende das Formular ab."
+    },
+    "abort": {
+      "already_configured": "Dieser Fernseher und dieser Entertainment-Bereich sind bereits eingerichtet.",
+      "reconfigure_successful": "Die neuen Einstellungen sind gespeichert.",
+      "reauth_successful": "Die Kopplung wurde erneuert."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Optionen für Halo Sync",
+        "data": {
+          "adb_source": "Sensor für die TV-Quelle über ADB",
+          "tv_endpoint": "Ambilight-Endpunkt"
+        },
+        "data_description": {
+          "adb_source": "Zeigt den aktuellen Eingang des Fernsehers als Sensor. Der Fernseher fragt einmal, ob Debugging erlaubt werden soll.",
+          "tv_endpoint": "Wo die Farben des Fernsehers gelesen werden. „Gemessen“ funktioniert auf den meisten Fernsehern. „Verarbeitet“ antwortet schneller, liefert aber auf manchen neueren Firmware-Versionen nur Nullen."
+        }
+      }
+    }
+  },
+  "selector": {
+    "tv_endpoint": {
+      "options": {
+        "measured": "Gemessen (Standard)",
+        "processed": "Verarbeitet"
+      }
+    }
+  },
+  "entity": {
+    "button": {
+      "refresh_positions": {
+        "name": "Lampenpositionen aktualisieren"
+      }
+    },
+    "switch": {
+      "stream": {
+        "name": "Stream"
+      },
+      "auto_resume": {
+        "name": "Automatisch fortsetzen"
+      },
+      "lights_off_with_tv": {
+        "name": "Lampen aus, wenn der Fernseher ausgeht"
+      }
+    },
+    "select": {
+      "preset": {
+        "name": "Preset"
+      }
+    },
+    "sensor": {
+      "tv_source": {
+        "name": "TV-Quelle"
+      },
+      "tv_color": {
+        "name": "TV-Farbe"
+      }
+    }
+  },
+  "services": {
+    "activate_preset": {
+      "name": "Preset aktivieren",
+      "description": "Wechselt das Halo-Sync-Preset (nach Name oder ID).",
+      "fields": {
+        "preset": {
+          "name": "Preset",
+          "description": "Name des Presets, z. B. Game"
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "unknown_preset": {
+      "message": "Unbekanntes Preset: {preset}"
+    }
+  }
+}

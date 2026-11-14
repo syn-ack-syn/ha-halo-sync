@@ -93,6 +93,29 @@ Copy `custom_components/halo_sync` into your Home Assistant `config/custom_compo
    (the panel shows their positions and uses them to decide what each light follows).
 5. Open **Halo Sync** in the sidebar, choose a preset and press **Start**.
 
+### Changing the setup later
+
+- **Reconfigure** (Settings → Devices & services → Halo Sync, menu of the entry): change the IP address of the TV or the Hue bridge,
+  for example after the router gave them a new one, and pick another Entertainment area. Your presets are kept. A new TV address
+  keeps the pairing if the TV still accepts it, otherwise a new PIN is shown on the TV. A new bridge address always asks you to press
+  the link button once: the stored key is never sent to an address the bridge was not known at.
+- **Pair again**: if the TV or the bridge no longer accepts the stored credentials, Halo Sync asks for a new authentication on
+  Settings → Devices & services. It walks you through a new PIN on the TV or the link button on the bridge.
+- **Options** (*Configure* on the same page): switch the ADB source sensor on or off and choose the Ambilight endpoint the colours are
+  read from (*Measured* works on most TVs; *Processed* answers faster, but is all zeros on some newer firmware).
+
+### Entities
+
+- **Entity categories** (since 0.7.0): *Auto resume*, *Lights off when TV turns off* and *Refresh light positions* are configuration
+  entities, *TV color* is a diagnostic entity. Home Assistant leaves them out of auto-generated dashboards and of service calls
+  that target a whole area or device.
+
+## Languages
+
+Halo Sync is available in **English** and **German**. The setup, options, entity names and error messages follow the language set in
+Home Assistant, and so does the sidebar panel (any German locale shows German, everything else English). Preset names such as *Movie* or
+*Game* stay as they are, because they are your data and the `halo_sync.activate_preset` service uses them.
+
 ## Network and delay
 
 **A poor connection to the TV adds delay to the lights, and a wired (Ethernet) connection is the most responsive.**

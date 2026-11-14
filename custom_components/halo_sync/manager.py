@@ -44,14 +44,46 @@ _ADDED_IN = {"tv_style": 2, "native": 3}
 from . import nettest
 from .resume import AutoResume
 from .streamer import Streamer, ends_with_lights_off
-from .tv_reader import TvReader
+from .tv_reader import AUTH_FAILED, TvReader
 
 _LOGGER = logging.getLogger(__name__)
 STORE_VERSION = 1
+MAX_EXTRA_LIGHTS = 16
+NAME_MAX = 40
+
+
+def check_preset_name(presets: dict[str, dict], preset_id: str | None, name) -> str:
+    """The stripped preset name, or ValueError("empty_name") / ValueError("duplicate_name").
+
+    A name equal (casefold) to the name of another preset is a duplicate; a preset keeps its own name.
+    """
+    cleaned = str(name or "").strip()[:NAME_MAX].strip()  # _clean_preset keeps NAME_MAX characters
+    if not cleaned:
+        raise ValueError("empty_name")
+    folded = cleaned.casefold()
+    if any(pid != preset_id and str(p.get("name", "")).strip().casefold() == folded for pid, p in presets.items()):
+        raise ValueError("duplicate_name")
+    return cleaned
+
+
+def preset_name_to_save(presets: dict[str, dict], preset_id: str | None, name) -> str:
+    """The name save_preset stores: the stored one when unchanged, else check_preset_name's result.
+
+    Unchanged (after stripping) keeps the stored name even if another preset shares it: stored presets
+    may do so from before the check existed. A stored name that is empty or blank is never "unchanged".
+    """
+    current = presets.get(preset_id, {}).get("name") if preset_id is not None else None
+    if (
+        isinstance(current, str)
+        and current.strip()
+        and str(name or "").strip()[:NAME_MAX].strip() == current.strip()
+    ):
+        return current
+    return check_preset_name(presets, preset_id, name)
 
 
 def _clean_preset(raw: dict, name_fallback: str) -> dict:
-    out = {"name": str(raw.get("name") or name_fallback)[:40]}
+    out = {"name": str(raw.get("name") or name_fallback)[:NAME_MAX]}
     # Missing keys (e.g. tunables added later) come from the matching default preset.
     base = DEFAULT_PRESETS.get(name_fallback, DEFAULT_PRESETS["game"])
     for key, (lo, hi, _) in TUNABLES.items():
@@ -66,7 +98,8 @@ def _clean_preset(raw: dict, name_fallback: str) -> dict:
         else base.get("smoothing_mode", "standard")
     )
     zones = {}
-    for ch, zone in (raw.get("native_zones") or {}).items():
+    native_zones = raw.get("native_zones")
+    for ch, zone in (native_zones if isinstance(native_zones, dict) else {}).items():
         try:
             if 0 <= int(zone) <= 9:
                 zones[str(int(ch))] = int(zone)
@@ -87,7 +120,12 @@ def _clean_preset(raw: dict, name_fallback: str) -> dict:
         dark = base["dark_content"]
     out["dark_content"] = dark
     lights = []
-    for light in raw.get("extra_lights") or []:
+    extra = raw.get("extra_lights")
+    for light in extra if isinstance(extra, list) else []:
+        if len(lights) >= MAX_EXTRA_LIGHTS:
+            break
+        if not isinstance(light, dict):
+            continue
         entity_id = str(light.get("entity_id", ""))
         if not entity_id.startswith("light."):
             continue
@@ -144,6 +182,8 @@ class Manager:
         self.lights_off_with_tv = False
         # Set by _async_persist_resume (unload or HA stop): the stream ending now is no manual stop.
         self._unloading = False
+        # A reauth flow is started at most once while this entry is loaded.
+        self._reauth_started = False
 
     # ---- state ---------------------------------------------------------
     async def async_load(self) -> None:
@@ -202,8 +242,20 @@ class Manager:
 
     @callback
     def _on_reader_change(self) -> None:
+        if self.reader.state == AUTH_FAILED:
+            self._start_reauth("tv")
         self.notify()
         self._maybe_resume()
+
+    @callback
+    def _start_reauth(self, target: str) -> None:
+        """Ask the user to pair again ("tv" or "hue"); once per entry lifetime."""
+        # Not while unloading: an error code left over from the ending stream must not start a reauth.
+        if self._reauth_started or self._unloading:
+            return
+        self._reauth_started = True
+        _LOGGER.warning("Halo Sync: the %s no longer accepts the stored credentials, starting reauthentication", target)
+        self.entry.async_start_reauth(self.hass, data={**self.entry.data, "reauth_target": target})
 
     @callback
     def _maybe_resume(self) -> None:
@@ -241,6 +293,10 @@ class Manager:
                 # Decide here, with the reason fixed when the stream ended: the Hue lights did the same.
                 off = ends_with_lights_off(self.streamer.end_reason, self.lights_off_with_tv)
                 self.hass.async_create_task(self._stop_extra(lights_off=off))
+                # Only a stream that ended on the error: a manual stop during a suspected (plain,
+                # forgeable) key alert leaves the code set but must not ask for a new key.
+                if self.streamer.end_reason == "error" and self.streamer.error_code == "hue_key_rejected":
+                    self._start_reauth("hue")
                 if not self._unloading and self.resume.stream_ended(self.streamer.stop_reason):
                     self._save()
                     # The reader may have reported "ok" before this callback; that change would be lost.
@@ -252,6 +308,9 @@ class Manager:
         return {
             "running": s.running,
             "error": s.error,
+            "error_code": s.error_code,
+            "reader_state": str(self.reader.state),
+            "link": s.link,
             "stats": s.stats,
             "tv_source": self.adb.source if self.adb else None,
             "tv_style": self.settings.get("tv") if self.settings.get("source") == "tv_style" else None,
@@ -279,7 +338,10 @@ class Manager:
 
     @callback
     def save_preset(self, preset_id: str | None, preset: dict) -> str:
-        if not preset_id:
+        if preset_id is not None and preset_id not in self.presets:
+            raise ValueError("unknown_preset")
+        preset = {**preset, "name": preset_name_to_save(self.presets, preset_id, preset.get("name"))}
+        if preset_id is None:
             base = re.sub(r"[^a-z0-9]+", "_", str(preset.get("name", "preset")).lower()).strip("_") or "preset"
             preset_id, n = base, 2
             while preset_id in self.presets:
@@ -294,8 +356,10 @@ class Manager:
 
     @callback
     def delete_preset(self, preset_id: str) -> None:
-        if len(self.presets) <= 1 or preset_id not in self.presets:
-            raise ValueError("cannot delete the last preset")
+        if preset_id not in self.presets:
+            raise ValueError("unknown_preset")
+        if len(self.presets) <= 1:
+            raise ValueError("last_preset")
         del self.presets[preset_id]
         if self.active == preset_id:
             self.active = next(iter(self.presets))
@@ -337,6 +401,16 @@ class Manager:
         """
         await self._async_persist_resume()
         await self.hass.async_add_executor_job(self.streamer.stop, True)
+
+    @callback
+    def begin_unload(self) -> None:
+        """Called before the platforms unload: from now on a failing stream or reader starts no reauth."""
+        self._unloading = True
+
+    @callback
+    def cancel_unload(self) -> None:
+        """The platforms did not unload, so the entry stays: auto resume, reauth and saving work again."""
+        self._unloading = False
 
     async def _async_on_ha_stop(self, event: Event) -> None:
         await self._async_persist_resume()

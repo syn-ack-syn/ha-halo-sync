@@ -2,21 +2,42 @@
 # integration from custom_components/halo_sync, so nothing here is built or published.
 [project]
 name = "ha-halo-sync"
-version = "0.6.0"
+version = "0.7.0"
 description = "Development environment for the Halo Sync Home Assistant integration"
 requires-python = ">=3.13"
 dependencies = []
 
 [dependency-groups]
+# The minimums keep dev apart from ha (see conflicts below): uv picks one version for both groups
+# whenever one fits, which would pull the fast suite back to the 2025.1.0 pins.
 dev = [
-    "pytest>=8.3",
-    "cryptography>=43",
-    "requests>=2.32",
+    "pytest>=9",
+    "cryptography>=50",
+    "requests>=2.34",
+    "urllib3>=2",
+]
+# Config flow tests against Home Assistant (tests_ha/), in their own environment so the fast suite
+# keeps its libraries and plugins:
+# `UV_PROJECT_ENVIRONMENT=.venv-ha uv run --no-default-groups --group ha pytest tests_ha`.
+# Pinned to the release that matches the minimum Home Assistant version in hacs.json (2025.1.0).
+ha = [
+    "pytest-homeassistant-custom-component==0.13.201",
+    # homeassistant==2025.1.0 pins this pre-release; uv takes it only when named here.
+    "aiohasupervisor==0.2.2b5",
+    # Imported by the integration: zeroconf by the config flow (the version Home Assistant 2025.1.0
+    # pins for its zeroconf integration), adb-shell by __init__.py (manifest.json requirement).
+    "zeroconf==0.136.2",
+    "adb-shell[async]>=0.4.4",
 ]
 
 [tool.uv]
 package = false
+# dev and ha resolve separately: the fast suite keeps current libraries (cryptography, requests,
+# urllib3), the config flow tests get the versions Home Assistant 2025.1.0 pins.
+conflicts = [[{ group = "dev" }, { group = "ha" }]]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra"
+# The Home Assistant pytest plugin (installed with the ha group) blocks sockets in every test, so it
+# stays off here; tests_ha/conftest.py loads it for the config flow tests.
+addopts = "-ra -p no:homeassistant"

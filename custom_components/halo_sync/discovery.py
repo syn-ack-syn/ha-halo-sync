@@ -90,12 +90,13 @@ def probe_tv(host: str) -> dict | None:
         major = int(api.get("Major", 0) or 0)
         ambilight = (data.get("featuring") or {}).get("jsonfeatures", {}).get("ambilight") or []
         has_ambilight = any(str(x).lower() == "ambilight" for x in ambilight)
+        # `reason` is a code from _LABELS, turned into text by tv_table().
         if scheme != "https" or port != 1926:
-            ok, reason = False, "answers on HTTP port 1925 only (older or TitanOS TV)"
+            ok, reason = False, "http_only"
         elif major < 6:
-            ok, reason = False, f"JointSpace API {major} is older than 6"
+            ok, reason = False, "api_old"
         elif not has_ambilight:
-            ok, reason = False, "does not report Ambilight"
+            ok, reason = False, "no_ambilight"
         else:
             ok, reason = True, ""
         return {
@@ -127,7 +128,7 @@ def probe_bridge(host: str) -> dict | None:
         "model": model,
         "api": str(data.get("apiversion") or ""),
         "compatible": ok,
-        "reason": "" if ok else f"model {model or 'unknown'} is not a Hue Bridge v2",
+        "reason": "" if ok else "not_v2",  # code from _LABELS, see bridge_table()
     }
 
 
@@ -173,6 +174,51 @@ async def async_discover(hass: Any, azc: Any, wait: float = 3.0) -> dict[str, li
 
 
 # ----------------------------------------------------------------------------- presentation
+# Texts shown in the config flow. The flow passes hass.config.language; anything starting with "de" is German.
+_LABELS: dict[str, dict[str, str]] = {
+    "en": {
+        "manual": "Enter the address manually (below)",
+        "header": "| Name | Address | Details | Status |",
+        "compatible": "Compatible",
+        "not_supported": "Not supported: {reason}",
+        "http_only": "answers on HTTP port 1925 only (older or TitanOS TV)",
+        "api_old": "JointSpace API {api} is older than 6",
+        "no_ambilight": "does not report Ambilight",
+        "not_v2": "model {model} is not a Hue Bridge v2",
+        "unknown_model": "unknown",
+        "no_tv": "_No TV found. Make sure it is switched on and on the same network, or enter its address below._",
+        "no_bridge": "_No Hue bridge found. Enter its address below._",
+    },
+    "de": {
+        "manual": "Adresse manuell eingeben (unten)",
+        "header": "| Name | Adresse | Details | Status |",
+        "compatible": "Kompatibel",
+        "not_supported": "Nicht unterstützt: {reason}",
+        "http_only": "antwortet nur auf HTTP-Port 1925 (älterer oder TitanOS-Fernseher)",
+        "api_old": "JointSpace-API {api} ist älter als 6",
+        "no_ambilight": "meldet kein Ambilight",
+        "not_v2": "Modell {model} ist keine Hue Bridge v2",
+        "unknown_model": "unbekannt",
+        "no_tv": "_Kein Fernseher gefunden. Prüfe, ob er eingeschaltet und im selben Netzwerk ist, oder gib seine Adresse unten ein._",
+        "no_bridge": "_Keine Hue Bridge gefunden. Gib ihre Adresse unten ein._",
+    },
+}
+
+
+def translate(language: str | None, key: str, **values: Any) -> str:
+    """The label `key` in German when `language` starts with "de", otherwise in English."""
+    labels = _LABELS["de" if str(language or "").lower().startswith("de") else "en"]
+    return labels.get(key, _LABELS["en"].get(key, key)).format(**values)
+
+
+def _status(d: dict, language: str) -> str:
+    if d["compatible"]:
+        return translate(language, "compatible")
+    model = d.get("model") or translate(language, "unknown_model")
+    reason = translate(language, d["reason"], api=d.get("api", ""), model=model) if d["reason"] else ""
+    return translate(language, "not_supported", reason=reason)
+
+
 def _cell(text: str) -> str:
     return str(text).replace("|", "/").replace("\n", " ").strip() or "-"
 
@@ -185,23 +231,23 @@ def bridge_label(d: dict) -> str:
     return " · ".join(p for p in (d["name"], d["model"], d["host"]) if p)
 
 
-def tv_table(tvs: list[dict]) -> str:
+def tv_table(tvs: list[dict], language: str) -> str:
     if not tvs:
-        return "_No TV found. Make sure it is switched on and on the same network, or enter its address below._"
-    rows = ["| Name | Address | Details | Status |", "|---|---|---|---|"]
+        return translate(language, "no_tv")
+    rows = [translate(language, "header"), "|---|---|---|---|"]
     for d in tvs:
         details = " ".join(x for x in (d["model"], f"API {d['api']}", d["platform"]) if x)
-        status = "Compatible" if d["compatible"] else f"Not supported: {d['reason']}"
+        status = _status(d, language)
         rows.append(f"| {_cell(d['name'])} | {_cell(d['host'])} | {_cell(details)} | {_cell(status)} |")
     return "\n".join(rows)
 
 
-def bridge_table(bridges: list[dict]) -> str:
+def bridge_table(bridges: list[dict], language: str) -> str:
     if not bridges:
-        return "_No Hue bridge found. Enter its address below._"
-    rows = ["| Name | Address | Details | Status |", "|---|---|---|---|"]
+        return translate(language, "no_bridge")
+    rows = [translate(language, "header"), "|---|---|---|---|"]
     for d in bridges:
         details = " ".join(x for x in (d["model"], f"API {d['api']}" if d["api"] else "", d["bridge_id"][-6:]) if x)
-        status = "Compatible" if d["compatible"] else f"Not supported: {d['reason']}"
+        status = _status(d, language)
         rows.append(f"| {_cell(d['name'])} | {_cell(d['host'])} | {_cell(details)} | {_cell(status)} |")
     return "\n".join(rows)

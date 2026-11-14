@@ -35,8 +35,9 @@ class _Clock:
 
 
 class _Resp:
-    def __init__(self, data) -> None:
+    def __init__(self, data, status: int = 200) -> None:
         self._data = data
+        self.status_code = status
 
     def json(self):
         return self._data
@@ -55,12 +56,16 @@ class _FakeSession:
         self.style_fail = False
         self.cost = 0.0
         self.closed = False
+        self.status: dict[str, int] = {}  # URL suffix -> HTTP status, e.g. {"/powerstate": 401}
 
     def _answer(self, url: str):
         self.calls.append(url)
         self.clock.t += self.cost
         if self.fail:
             raise requests.ConnectionError("TV is off")
+        for suffix, status in self.status.items():
+            if url.endswith(suffix):
+                return _Resp({"error": "unauthorized"}, status)
         if url.endswith("/powerstate"):
             return _Resp({"powerstate": self.power})
         if url.endswith("/menuitems/settings/current"):
@@ -325,6 +330,80 @@ def test_backoff_resets_after_success(reader, session, changes):
 def test_bad_json_counts_as_failure(reader, session):
     session.layer = None  # {"layer1": null}
     assert reader._step() == 0.5
+    assert reader.state == "unreachable"
+
+
+def _refuse(reader, times):
+    for _ in range(times):
+        reader._power_due = 0.0  # poll the powerstate in every cycle
+        reader._step()
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_refused_color_read_is_auth_failed_not_unreachable(reader, session, changes, status):
+    session.status = {"/ambilight/measured": status}
+    assert reader._step() == 0.5  # same backoff as other failures
+    assert reader.state == "unreachable"  # a single refusal is not enough
+    for _ in range(tv_reader_mod.AUTH_FAILS_NEEDED - 1):
+        reader._step()
+    assert reader.state == "auth_failed" == tv_reader_mod.AUTH_FAILED
+    assert changes == ["auth_failed"]  # starts unreachable; on_change like any other state
+    assert reader.latest_measured is None and reader.read_count == 0
+
+
+def test_refused_powerstate_is_auth_failed(reader, session, changes):
+    session.status = {"/powerstate": 401}
+    _refuse(reader, tv_reader_mod.AUTH_FAILS_NEEDED)
+    assert reader.state == "auth_failed"
+    assert session.count("/ambilight/measured") == 0  # stopped before the color read
+
+
+def test_other_failure_resets_the_refusal_count(reader, session):
+    session.status = {"/ambilight/measured": 401}
+    _refuse(reader, tv_reader_mod.AUTH_FAILS_NEEDED - 1)
+    session.status = {"/ambilight/measured": 500}  # body has no layer1: a plain failure
+    reader._step()
+    session.status = {"/ambilight/measured": 401}
+    _refuse(reader, tv_reader_mod.AUTH_FAILS_NEEDED - 1)
+    assert reader.state == "unreachable"
+
+
+def test_success_resets_the_refusal_count(reader, session):
+    session.status = {"/ambilight/measured": 401}
+    _refuse(reader, tv_reader_mod.AUTH_FAILS_NEEDED - 1)
+    session.status = {}
+    reader._step()
+    session.status = {"/ambilight/measured": 401}
+    _refuse(reader, tv_reader_mod.AUTH_FAILS_NEEDED - 1)
+    assert reader.state == "unreachable"
+
+
+def test_standby_answer_resets_the_refusal_count(reader, session, clock):
+    session.status = {"/ambilight/measured": 401}
+    _refuse(reader, tv_reader_mod.AUTH_FAILS_NEEDED - 1)
+    session.status = {}
+    session.power = "Standby"
+    reader._power_due = 0.0
+    assert reader._step() == TV_STANDBY_POLL_S
+    assert reader.state == "standby"
+    session.power = "On"
+    session.status = {"/ambilight/measured": 401}
+    reader._step()  # wakes up: the color read is refused once
+    assert reader.state == "unreachable"
+
+
+def test_auth_failed_recovers_once_the_tv_accepts_again(reader, session, changes):
+    session.status = {"/ambilight/measured": 401}
+    _refuse(reader, tv_reader_mod.AUTH_FAILS_NEEDED)
+    session.status = {}
+    reader._step()
+    assert reader.state == "ok"
+    assert changes == ["auth_failed", "ok"]
+
+
+def test_other_http_errors_stay_unreachable(reader, session):
+    session.status = {"/ambilight/measured": 500}  # body has no layer1
+    reader._step()
     assert reader.state == "unreachable"
 
 

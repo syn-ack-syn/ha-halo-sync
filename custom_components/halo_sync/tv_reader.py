@@ -40,12 +40,28 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
-State = Literal["ok", "standby", "unreachable"]
+State = Literal["ok", "standby", "unreachable", "auth_failed"]
+# The TV answers, but refuses our pairing credentials (HTTP 401/403): reading again cannot help.
+AUTH_FAILED: State = "auth_failed"
+# Refusals in a row before the state is auth_failed: a single 401/403 (e.g. a digest nonce hiccup)
+# would otherwise start a reauth that stays even when the next read works again.
+AUTH_FAILS_NEEDED = 3
+AUTH_STATUS = (401, 403)
 MENU_NODES = (TV_MENU_STYLE, TV_MENU_VIDEO_STYLE, TV_MENU_BRIGHTNESS, TV_MENU_SATURATION)
 
 
 class _Stopped(Exception):
     """Raised between two requests of a cycle once stop() was called."""
+
+
+class _AuthFailed(Exception):
+    """The TV answered 401/403: it no longer accepts the paired user and password."""
+
+
+def _check_auth(resp) -> None:
+    """Raise _AuthFailed for a 401/403 answer, before its body is read."""
+    if resp.status_code in AUTH_STATUS:
+        raise _AuthFailed(f"TV answered HTTP {resp.status_code}")
 
 
 class TvReader:
@@ -83,6 +99,7 @@ class TvReader:
         self._menu: dict | None = None
         self._style_wanted = False
         self._backoff = TV_BACKOFF_MIN_S
+        self._auth_fails = 0  # 401/403 answers in a row
         self._power_due = 0.0
         self._style_due = 0.0
         # Full rate while True (set by the stream), TV_IDLE_POLL_HZ otherwise.
@@ -190,15 +207,22 @@ class TvReader:
             if t0 >= self._power_due:
                 self._power_due = t0 + TV_POWER_POLL_S
                 if self._power_off():
+                    self._auth_fails = 0  # an authenticated answer: the credentials work
                     self._set_state("standby")
                     return TV_STANDBY_POLL_S
                 self._check_stop()
             self._read_colors()
             self._check_stop()
             self._poll_style(t0)
+        except _AuthFailed as exc:
+            _LOGGER.debug("TV refused the credentials: %s", exc)
+            self._auth_fails += 1
+            return self._fail(AUTH_FAILED if self._auth_fails >= AUTH_FAILS_NEEDED else "unreachable")
         except (requests.RequestException, ValueError, KeyError, TypeError, AttributeError) as exc:
             _LOGGER.debug("TV read failed: %s", exc)
+            self._auth_fails = 0
             return self._fail()
+        self._auth_fails = 0
         self._backoff = TV_BACKOFF_MIN_S
         # A completely black frame is a dark scene, not standby: polling goes on at the same rate.
         self._set_state("ok")
@@ -209,6 +233,7 @@ class TvReader:
         """Standby: check every TV_STANDBY_POLL_S whether the TV reports On again."""
         self._backoff = TV_BACKOFF_MIN_S
         if self._power_off():
+            self._auth_fails = 0
             return TV_STANDBY_POLL_S
         self._check_stop()
         self._read_colors()
@@ -216,10 +241,10 @@ class TvReader:
         self._set_state("ok")
         return 0.0
 
-    def _fail(self) -> float:
+    def _fail(self, state: State = "unreachable") -> float:
         delay = self._backoff
         self._backoff = min(TV_BACKOFF_MAX_S, self._backoff * 2)
-        self._set_state("unreachable")
+        self._set_state(state)
         return delay
 
     def _set_state(self, state: State) -> None:
@@ -236,7 +261,9 @@ class TvReader:
     # ---- requests --------------------------------------------------------
     def _read_colors(self) -> dict:
         t = time.perf_counter()
-        layer = self._session.get(f"{self._base}/ambilight/{self._endpoint}", timeout=TV_REQUEST_TIMEOUT_S).json()["layer1"]
+        resp = self._session.get(f"{self._base}/ambilight/{self._endpoint}", timeout=TV_REQUEST_TIMEOUT_S)
+        _check_auth(resp)
+        layer = resp.json()["layer1"]
         if not isinstance(layer, dict):
             raise ValueError("unexpected Ambilight layer")
         self._read_ms.append((time.perf_counter() - t) * 1000)
@@ -247,6 +274,7 @@ class TvReader:
     def _power_off(self) -> bool:
         """True when /powerstate reports something other than On; an unreadable answer counts as on."""
         resp = self._session.get(f"{self._base}/powerstate", timeout=TV_REQUEST_TIMEOUT_S)
+        _check_auth(resp)
         try:
             power = resp.json().get("powerstate")
         except (ValueError, AttributeError):
