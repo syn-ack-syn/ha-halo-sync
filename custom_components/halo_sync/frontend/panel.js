@@ -397,7 +397,7 @@ class HaloSyncPanel extends HTMLElement {
       });
     } finally {
       this._deleting = false;
-      // Only the button comes back: a new render would take the focus from whoever types in another preset meanwhile.
+      // Free the button in case no render has replaced it meanwhile.
       const del = this.shadowRoot.getElementById("del");
       if (del) { del.disabled = false; del.removeAttribute("disabled"); }
     }
@@ -934,7 +934,7 @@ const CSS = `
     .egrid { display:grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); column-gap:32px; align-items:start; }
     .egrid > .g-left { grid-column:1; }
     /* below the sticky toolbar (56px) with 16px space; no ancestor inside the panel sets overflow, which would stop sticky */
-    .egrid > .g-pos { grid-column:2; grid-row: 1 / span 5; position:sticky; top:72px; }
+    .egrid > .g-pos { grid-column:2; grid-row: 1 / span 5; position:sticky; top:72px; max-height:calc(100vh - 88px); overflow-y:auto; }
     .g-pos svg { max-width:none; }
   }
   @container (max-width: 600px) { ${NARROW} }

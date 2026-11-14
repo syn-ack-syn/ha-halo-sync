@@ -104,6 +104,8 @@ Copy `custom_components/halo_sync` into your Home Assistant `config/custom_compo
 - **Options** (*Configure* on the same page): switch the ADB source sensor on or off and choose the Ambilight endpoint the colours are
   read from (*Measured* works on most TVs; *Processed* answers faster, but is all zeros on some newer firmware).
 
+### Entities
+
 - **Entity categories** (since 0.7.0): *Auto resume*, *Lights off when TV turns off* and *Refresh light positions* are configuration
   entities, *TV color* is a diagnostic entity. Home Assistant leaves them out of auto-generated dashboards and of service calls
   that target a whole area or device.
