@@ -70,19 +70,37 @@ def _code(value) -> str:
     return "unexpected" if value is not None else "missing"
 
 
+class _ChallengeError(Exception):
+    """requests failed while answering the TV's digest challenge (carries the original exception)."""
+
+
+class _StrictDigestAuth(HTTPDigestAuth):
+    """HTTPDigestAuth that reports a malformed challenge instead of a stray KeyError and the like.
+
+    Only the challenge handling is guarded: errors in building or sending the request itself stay
+    visible as what they are.
+    """
+
+    def handle_401(self, r, **kwargs):
+        try:
+            return super().handle_401(r, **kwargs)
+        except requests.RequestException:
+            raise
+        except (KeyError, ValueError, TypeError, AttributeError, IndexError) as exc:
+            raise _ChallengeError(exc) from exc
+
+
 def _digest_request(send, url: str, user: str, password: str, what: str, **kwargs) -> requests.Response:
     """A request (send: requests.get or requests.post) with HTTP digest auth.
 
-    A malformed auth challenge (e.g. no nonce) is an ApiError: requests raises KeyError and the like
-    while answering such a challenge. Network errors stay requests.RequestException (some of those are
-    ValueErrors too, so they are passed on first).
+    A malformed auth challenge (e.g. no nonce) is an ApiError. Network errors stay
+    requests.RequestException.
     """
     try:
-        return send(url, auth=HTTPDigestAuth(user, password), **kwargs)
-    except requests.RequestException:
-        raise
-    except (KeyError, ValueError, TypeError, AttributeError, IndexError) as exc:
-        raise ApiError(f"{what}: the TV sent an unusable authentication challenge ({type(exc).__name__})") from exc
+        return send(url, auth=_StrictDigestAuth(user, password), **kwargs)
+    except _ChallengeError as exc:
+        cause = exc.args[0] if exc.args else exc
+        raise ApiError(f"{what}: the TV sent an unusable authentication challenge ({type(cause).__name__})") from cause
 
 
 def _missing(data: dict, *fields: str) -> list[str]:
