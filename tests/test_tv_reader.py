@@ -368,6 +368,30 @@ def test_other_failure_resets_the_refusal_count(reader, session):
     assert reader.state == "unreachable"
 
 
+def test_success_resets_the_refusal_count(reader, session):
+    session.status = {"/ambilight/measured": 401}
+    _refuse(reader, tv_reader_mod.AUTH_FAILS_NEEDED - 1)
+    session.status = {}
+    reader._step()
+    session.status = {"/ambilight/measured": 401}
+    _refuse(reader, tv_reader_mod.AUTH_FAILS_NEEDED - 1)
+    assert reader.state == "unreachable"
+
+
+def test_standby_answer_resets_the_refusal_count(reader, session, clock):
+    session.status = {"/ambilight/measured": 401}
+    _refuse(reader, tv_reader_mod.AUTH_FAILS_NEEDED - 1)
+    session.status = {}
+    session.power = "Standby"
+    reader._power_due = 0.0
+    assert reader._step() == TV_STANDBY_POLL_S
+    assert reader.state == "standby"
+    session.power = "On"
+    session.status = {"/ambilight/measured": 401}
+    reader._step()  # wakes up: the color read is refused once
+    assert reader.state == "unreachable"
+
+
 def test_auth_failed_recovers_once_the_tv_accepts_again(reader, session, changes):
     session.status = {"/ambilight/measured": 401}
     _refuse(reader, tv_reader_mod.AUTH_FAILS_NEEDED)

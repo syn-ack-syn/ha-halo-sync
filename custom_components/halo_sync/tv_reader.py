@@ -207,6 +207,7 @@ class TvReader:
             if t0 >= self._power_due:
                 self._power_due = t0 + TV_POWER_POLL_S
                 if self._power_off():
+                    self._auth_fails = 0  # an authenticated answer: the credentials work
                     self._set_state("standby")
                     return TV_STANDBY_POLL_S
                 self._check_stop()
@@ -232,6 +233,7 @@ class TvReader:
         """Standby: check every TV_STANDBY_POLL_S whether the TV reports On again."""
         self._backoff = TV_BACKOFF_MIN_S
         if self._power_off():
+            self._auth_fails = 0
             return TV_STANDBY_POLL_S
         self._check_stop()
         self._read_colors()

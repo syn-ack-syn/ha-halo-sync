@@ -339,6 +339,7 @@ def test_authenticated_key_alert_on_reconnect_ends_the_stream(make_streamer, scr
     assert _run(s, 2)  # ended by itself instead of retrying every 30 s
     assert "bridge rejected the reconnect" in s.error
     assert s.error_code == "hue_key_rejected"
+    assert s.end_reason == "error"  # the manager starts the Hue reauth only for this end
     assert len(_ScriptedDTLS.clients) == 1 + len(alerts)
     assert actions[-1] == "stop" and not s.running and reader.fast is False
 
