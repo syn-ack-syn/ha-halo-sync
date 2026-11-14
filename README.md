@@ -93,6 +93,20 @@ Copy `custom_components/halo_sync` into your Home Assistant `config/custom_compo
    (the panel shows their positions and uses them to decide what each light follows).
 5. Open **Halo Sync** in the sidebar, choose a preset and press **Start**.
 
+### Changing the setup later
+
+- **Reconfigure** (Settings → Devices & services → Halo Sync, menu of the entry): change the IP address of the TV or the Hue bridge,
+  for example after the router gave them a new one, and pick another Entertainment area. The pairing and your presets are kept, so
+  there is no need to pair again.
+- **Options** (*Configure* on the same page): switch the ADB source sensor on or off and choose the Ambilight endpoint the colours are
+  read from (*Measured* works on most TVs; *Processed* answers faster, but is all zeros on some newer firmware).
+
+## Languages
+
+Halo Sync is available in **English** and **German**. The setup, options, entity names and error messages follow the language set in
+Home Assistant, and so does the sidebar panel (any German locale shows German, everything else English). Preset names such as *Movie* or
+*Game* stay as they are, because they are your data and the `halo_sync.activate_preset` service uses them.
+
 ## Network and delay
 
 **A poor connection to the TV adds delay to the lights, and a wired (Ethernet) connection is the most responsive.**
