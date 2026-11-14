@@ -325,7 +325,7 @@ class Manager:
         if preset_id is not None and preset_id not in self.presets:
             raise ValueError("unknown_preset")
         current = self.presets.get(preset_id, {}).get("name") if preset_id is not None else None
-        if current is not None and str(preset.get("name") or "").strip()[:NAME_MAX].strip() == current.strip():
+        if current and current.strip() and str(preset.get("name") or "").strip()[:NAME_MAX].strip() == current.strip():
             # Unchanged name: stored presets may already share a name from before the check existed.
             preset = {**preset, "name": current}
         else:

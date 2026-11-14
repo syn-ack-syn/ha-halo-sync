@@ -29,7 +29,7 @@
         "data": {
           "entertainment_id": "Entertainment-Bereich"
         },
-        "description": "Wähle den Hue Entertainment-Bereich, an den die Farben des Fernsehers gesendet werden."
+        "description": "Wähle den Hue-Entertainment-Bereich, an den die Farben des Fernsehers gesendet werden."
       },
       "reconfigure": {
         "title": "Adressen ändern",
@@ -56,7 +56,7 @@
       },
       "reconfigure_area": {
         "title": "Entertainment-Bereich",
-        "description": "Wähle den Hue Entertainment-Bereich, an den die Farben des Fernsehers gesendet werden.",
+        "description": "Wähle den Hue-Entertainment-Bereich, an den die Farben des Fernsehers gesendet werden.",
         "data": {
           "entertainment_id": "Entertainment-Bereich"
         }
@@ -112,7 +112,7 @@
         },
         "data_description": {
           "adb_source": "Zeigt den aktuellen Eingang des Fernsehers als Sensor. Der Fernseher fragt einmal, ob Debugging erlaubt werden soll.",
-          "tv_endpoint": "Wo die Farben des Fernsehers gelesen werden. Gemessen funktioniert auf den meisten Fernsehern. Verarbeitet antwortet schneller, liefert aber auf manchen neueren Firmware-Versionen nur Nullen."
+          "tv_endpoint": "Wo die Farben des Fernsehers gelesen werden. „Gemessen“ funktioniert auf den meisten Fernsehern. „Verarbeitet“ antwortet schneller, liefert aber auf manchen neueren Firmware-Versionen nur Nullen."
         }
       }
     }
