@@ -83,10 +83,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    mgr: Manager = entry.runtime_data
+    # Before the platforms go: no reauth may start in the gap until the manager shuts down.
+    mgr.begin_unload()
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if not unload_ok:
         return False
-    mgr: Manager = entry.runtime_data
     await mgr.async_shutdown()
     if mgr.adb:
         await mgr.adb.stop()

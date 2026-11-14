@@ -391,6 +391,11 @@ class Manager:
         await self._async_persist_resume()
         await self.hass.async_add_executor_job(self.streamer.stop, True)
 
+    @callback
+    def begin_unload(self) -> None:
+        """Called before the platforms unload: from now on a failing stream or reader starts no reauth."""
+        self._unloading = True
+
     async def _async_on_ha_stop(self, event: Event) -> None:
         await self._async_persist_resume()
 

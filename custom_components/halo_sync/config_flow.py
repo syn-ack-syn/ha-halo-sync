@@ -1,6 +1,7 @@
 """Config flow: pair with the TV (PIN), link the Hue bridge (button), pick the entertainment area.
 
-Also: reconfigure (new addresses or area, pairing kept), reauth (new TV PIN or Hue key) and options.
+Also: reconfigure (new addresses or area; a new address is paired again where needed), reauth (new TV PIN
+or Hue key) and options.
 """
 
 from __future__ import annotations
@@ -122,15 +123,18 @@ class AmbiHueConfigFlow(ConfigFlow, domain=DOMAIN):
             self._areas = await self.hass.async_add_executor_job(
                 api.hue_entertainment_areas, self._data[CONF_HUE_HOST], self._data[CONF_HUE_USER]
             )
+        except api.HueAuthError as exc:
+            _LOGGER.warning("The Hue bridge rejected the application key: %s", exc)
+            self._areas = {}
+            return "hue_auth"
         except _HUE_ERRORS as exc:
             _LOGGER.warning("Reading the Hue entertainment areas failed: %s", exc)
             self._areas = {}
             return "hue_unreachable"
         return None if self._areas else "no_areas"
 
-    async def _area_form(self, step_id: str, default: str | None = None, load: bool = True) -> ConfigFlowResult:
-        """The area choice. Without areas: a form without fields, submitting it checks again."""
-        error = await self._load_areas() if load else None
+    def _area_form(self, step_id: str, default: str | None = None, error: str | None = None) -> ConfigFlowResult:
+        """The area choice (areas from _load_areas). With an error: a form without fields, submitting checks again."""
         if error:
             return self.async_show_form(step_id=step_id, data_schema=vol.Schema({}), errors={"base": error})
         if default in self._areas:
@@ -220,9 +224,11 @@ class AmbiHueConfigFlow(ConfigFlow, domain=DOMAIN):
             await self.async_set_unique_id(f"{self._data[CONF_TV_HOST]}_{user_input[CONF_ENT_ID]}")
             self._abort_if_unique_id_configured()
             return self.async_create_entry(title=f"Halo Sync: {self._areas[user_input[CONF_ENT_ID]]}", data=self._data)
-        return await self._area_form("area")
+        return self._area_form("area", error=await self._load_areas())
 
-    # ---- reconfigure: new addresses or area, the pairing and the unique ID stay ---------------
+    # ---- reconfigure: new addresses or area, the unique ID stays ---------------------------------
+    # A changed TV address is checked with the stored pairing and paired again if that TV rejects it.
+    # A changed bridge address always gets a new key (link button): the stored key is never sent to it.
     async def async_step_reconfigure(self, user_input=None) -> ConfigFlowResult:
         entry = self._get_reconfigure_entry()
         errors = {}
@@ -230,26 +236,35 @@ class AmbiHueConfigFlow(ConfigFlow, domain=DOMAIN):
             tv = (user_input.get(CONF_TV_HOST) or "").strip()
             hue = (user_input.get(CONF_HUE_HOST) or "").strip()
             self._data = {**entry.data, CONF_TV_HOST: tv, CONF_HUE_HOST: hue}
+            self._pairing = None
             if not tv:
                 errors["base"] = "no_tv"
             elif not hue:
                 errors["base"] = "no_bridge"
             else:
-                try:
-                    await self.hass.async_add_executor_job(
-                        api.tv_check_auth, tv, entry.data[CONF_TV_USER], entry.data[CONF_TV_PASS]
-                    )
-                except api.TvAuthError as exc:
-                    _LOGGER.warning("TV rejected the stored pairing: %s", exc)
-                    errors["base"] = "tv_auth"
-                except (api.ApiError, requests.RequestException) as exc:
-                    _LOGGER.warning("TV check failed: %s", exc)
-                    errors["base"] = "tv_unreachable"
-                else:
+                error = None
+                if tv != entry.data.get(CONF_TV_HOST):  # an unchanged TV may be off, that must not block
+                    try:
+                        await self.hass.async_add_executor_job(
+                            api.tv_check_auth, tv, entry.data[CONF_TV_USER], entry.data[CONF_TV_PASS]
+                        )
+                    except api.TvAuthError as exc:
+                        _LOGGER.warning("The TV at the new address rejected the stored pairing: %s", exc)
+                        return self.async_show_form(
+                            step_id="reconfigure_tv", data_schema=vol.Schema({}), errors={"base": "tv_auth"}
+                        )
+                    except (api.ApiError, requests.RequestException) as exc:
+                        _LOGGER.warning("TV check failed: %s", exc)
+                        error = "tv_unreachable"
+                if error is None:
+                    if self._hue_host_changed():
+                        return await self.async_step_reconfigure_hue_link()
                     error = await self._load_areas()
                     if error is None:
-                        return await self._area_form("reconfigure_area", default=entry.data.get(CONF_ENT_ID), load=False)
-                    errors["base"] = error
+                        return self._area_form("reconfigure_area", default=entry.data.get(CONF_ENT_ID))
+                    if error == "hue_auth":
+                        return self._reconfigure_hue_link_form("hue_auth")
+                errors["base"] = error
         shown = user_input or entry.data
         return self.async_show_form(
             step_id="reconfigure",
@@ -262,6 +277,46 @@ class AmbiHueConfigFlow(ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
+    def _hue_host_changed(self) -> bool:
+        return self._data[CONF_HUE_HOST] != self._get_reconfigure_entry().data.get(CONF_HUE_HOST)
+
+    async def async_step_reconfigure_tv(self, user_input=None) -> ConfigFlowResult:
+        """The TV at the new address rejects the stored pairing: pair it there (confirm first, then the PIN)."""
+        errors = {}
+        if user_input is not None:
+            error = await self._pair_request()  # self._data holds the new TV address
+            if error is None:
+                return await self.async_step_reconfigure_tv_pin()
+            errors["base"] = error
+        return self.async_show_form(step_id="reconfigure_tv", data_schema=vol.Schema({}), errors=errors)
+
+    async def async_step_reconfigure_tv_pin(self, user_input=None) -> ConfigFlowResult:
+        errors = {}
+        if user_input is not None:
+            error = await self._pair_grant(user_input["pin"].strip())
+            if error is None:
+                if self._hue_host_changed():
+                    return await self.async_step_reconfigure_hue_link()
+                return await self.async_step_reconfigure_area()
+            errors["base"] = error
+        return self.async_show_form(
+            step_id="reconfigure_tv_pin", data_schema=vol.Schema({vol.Required("pin"): str}), errors=errors
+        )
+
+    def _reconfigure_hue_link_form(self, error: str | None = None) -> ConfigFlowResult:
+        return self.async_show_form(
+            step_id="reconfigure_hue_link", data_schema=vol.Schema({}), errors={"base": error} if error else {}
+        )
+
+    async def async_step_reconfigure_hue_link(self, user_input=None) -> ConfigFlowResult:
+        """A new key from the bridge (new address, or the stored key was rejected)."""
+        if user_input is not None:
+            error = await self._hue_register()  # self._data holds the new bridge address
+            if error is None:
+                return await self.async_step_reconfigure_area()
+            return self._reconfigure_hue_link_form(error)
+        return self._reconfigure_hue_link_form()
+
     async def async_step_reconfigure_area(self, user_input=None) -> ConfigFlowResult:
         entry = self._get_reconfigure_entry()
         if user_input and user_input.get(CONF_ENT_ID) in self._areas:
@@ -269,17 +324,18 @@ class AmbiHueConfigFlow(ConfigFlow, domain=DOMAIN):
             changes: dict[str, Any] = {}
             if ent_id != entry.data.get(CONF_ENT_ID):  # the title names the area; a kept area keeps a renamed title
                 changes["title"] = f"Halo Sync: {self._areas[ent_id]}"
+            updates = {CONF_TV_HOST: self._data[CONF_TV_HOST], CONF_HUE_HOST: self._data[CONF_HUE_HOST], CONF_ENT_ID: ent_id}
+            # New TV pairing or Hue key from this flow; unchanged ones are the stored values.
+            for key in (CONF_TV_USER, CONF_TV_PASS, CONF_HUE_USER, CONF_HUE_CLIENTKEY, CONF_HUE_APPID):
+                if key in self._data:
+                    updates[key] = self._data[key]
             return self.async_update_reload_and_abort(
-                entry,
-                data_updates={
-                    CONF_TV_HOST: self._data[CONF_TV_HOST],
-                    CONF_HUE_HOST: self._data[CONF_HUE_HOST],
-                    CONF_ENT_ID: ent_id,
-                },
-                reason="reconfigure_successful",
-                **changes,
+                entry, data_updates=updates, reason="reconfigure_successful", **changes
             )
-        return await self._area_form("reconfigure_area", default=entry.data.get(CONF_ENT_ID))
+        error = await self._load_areas()
+        if error == "hue_auth":
+            return self._reconfigure_hue_link_form(error)
+        return self._area_form("reconfigure_area", default=entry.data.get(CONF_ENT_ID), error=error)
 
     # ---- reauth: the TV or the bridge rejected the stored pairing ------------------------------
     async def async_step_reauth(self, entry_data: Mapping[str, Any]) -> ConfigFlowResult:

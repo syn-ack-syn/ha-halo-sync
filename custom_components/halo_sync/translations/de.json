@@ -33,11 +33,26 @@
       },
       "reconfigure": {
         "title": "Adressen ändern",
-        "description": "Ändere die Adresse des Fernsehers oder der Hue Bridge, zum Beispiel wenn der Router ihnen eine neue IP-Adresse gegeben hat. Die Kopplung und deine Presets bleiben erhalten. Danach kannst du den Entertainment-Bereich wählen.",
+        "description": "Ändere die Adresse des Fernsehers oder der Hue Bridge, zum Beispiel wenn der Router ihnen eine neue IP-Adresse gegeben hat. Deine Presets bleiben erhalten. Eine neue Bridge-Adresse wird mit der Link-Taste neu verbunden. Akzeptiert der Fernseher unter einer neuen Adresse die gespeicherte Kopplung nicht, koppelst du ihn mit einer PIN neu. Danach kannst du den Entertainment-Bereich wählen.",
         "data": {
           "tv_host": "IP-Adresse des Fernsehers",
           "hue_host": "IP-Adresse der Hue Bridge"
         }
+      },
+      "reconfigure_tv": {
+        "title": "Fernseher unter der neuen Adresse koppeln",
+        "description": "Schalte den Fernseher ein und sende das Formular ab. Danach erscheint eine PIN auf dem Fernseher."
+      },
+      "reconfigure_tv_pin": {
+        "title": "Fernseher koppeln",
+        "description": "Gib die PIN ein, die auf dem Fernseher angezeigt wird.",
+        "data": {
+          "pin": "PIN"
+        }
+      },
+      "reconfigure_hue_link": {
+        "title": "Hue Bridge verbinden",
+        "description": "Drücke die Link-Taste auf der Hue Bridge und sende das Formular innerhalb von 30 Sekunden ab. Die Bridge gibt Halo Sync dann einen neuen Schlüssel."
       },
       "reconfigure_area": {
         "title": "Entertainment-Bereich",
@@ -78,7 +93,8 @@
       "no_tv": "Wähle einen Fernseher aus der Liste oder gib seine IP-Adresse ein.",
       "no_bridge": "Wähle eine Hue Bridge aus der Liste oder gib ihre IP-Adresse ein.",
       "no_areas": "Die Bridge hat keine Entertainment-Bereiche. Lege in der Hue-App einen an und sende das Formular dann erneut ab.",
-      "tv_auth": "Der Fernseher akzeptiert die gespeicherte Kopplung nicht mehr. Kopple ihn über die Meldung zur erneuten Authentifizierung von Halo Sync unter Einstellungen > Geräte & Dienste neu."
+      "tv_auth": "Der Fernseher unter dieser Adresse akzeptiert die gespeicherte Kopplung nicht. Sende das Formular ab, um ihn neu zu koppeln.",
+      "hue_auth": "Die Hue Bridge akzeptiert den Schlüssel nicht."
     },
     "abort": {
       "already_configured": "Dieser Fernseher und dieser Entertainment-Bereich sind bereits eingerichtet.",

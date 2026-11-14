@@ -31,6 +31,10 @@ class TvAuthError(ApiError):
     """Raised when the TV rejects the stored pairing credentials (HTTP 401/403)."""
 
 
+class HueAuthError(ApiError):
+    """Raised when the Hue bridge rejects the application key (HTTP 401/403)."""
+
+
 def _device(dev_id: str) -> dict:
     return {
         "device_name": "Home Assistant Halo Sync",
@@ -42,6 +46,19 @@ def _device(dev_id: str) -> dict:
     }
 
 
+def _json(r: requests.Response, what: str):
+    """The decoded answer. An answer that is no JSON is an ApiError; the text is never put in the message."""
+    try:
+        return r.json()
+    except ValueError as exc:
+        raise ApiError(f"{what}: answer is no JSON (HTTP {r.status_code})") from exc
+
+
+def _missing(data: dict, *fields: str) -> list[str]:
+    """Names of the fields that are absent or not a non-empty string (only names, never values)."""
+    return [f for f in fields if not isinstance(data.get(f), str) or not data.get(f)]
+
+
 def tv_pair_request(host: str) -> dict:
     dev_id = "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(16))
     r = requests.post(
@@ -49,12 +66,21 @@ def tv_pair_request(host: str) -> dict:
         json={"scope": ["read", "write", "control"], "device": _device(dev_id)},
         verify=False,
         timeout=10,
-    ).json()
-    if not isinstance(r, dict) or r.get("error_id") != "SUCCESS":
-        raise ApiError(f"pair request failed: {r}")
-    if "auth_key" not in r or "timestamp" not in r:
-        raise ApiError(f"pair request answer has no auth_key or timestamp: {r}")
-    return {"id": dev_id, "auth_key": r["auth_key"], "timestamp": r["timestamp"]}
+    )
+    data = _json(r, "pair request")
+    if not isinstance(data, dict):
+        raise ApiError(f"pair request answer is no object (HTTP {r.status_code})")
+    if data.get("error_id") != "SUCCESS":
+        # Only the error id: the answer can hold the auth_key.
+        raise ApiError(f"pair request failed: HTTP {r.status_code}, error_id {data.get('error_id')!r}")
+    # The timestamp is signed as text together with the PIN; the TV sends it as a number.
+    timestamp = data.get("timestamp")
+    missing = _missing(data, "auth_key")
+    if isinstance(timestamp, bool) or not isinstance(timestamp, (int, str)) or timestamp == "":
+        missing.append("timestamp")
+    if missing:
+        raise ApiError(f"pair request answer lacks {', '.join(missing)}")
+    return {"id": dev_id, "auth_key": data["auth_key"], "timestamp": timestamp}
 
 
 def tv_pair_grant(host: str, pairing: dict, pin: str) -> tuple[str, str]:
@@ -71,9 +97,15 @@ def tv_pair_grant(host: str, pairing: dict, pin: str) -> tuple[str, str]:
         verify=False,
         timeout=10,
         auth=HTTPDigestAuth(pairing["id"], pairing["auth_key"]),
+        allow_redirects=False,
     )
-    if r.status_code != 200 or r.json().get("error_id") != "SUCCESS":
-        raise ApiError(f"pair grant failed: {r.status_code} {r.text}")
+    if r.status_code != 200:
+        raise ApiError(f"pair grant failed: HTTP {r.status_code}")
+    data = _json(r, "pair grant")
+    if not isinstance(data, dict):
+        raise ApiError("pair grant answer is no object")
+    if data.get("error_id") != "SUCCESS":
+        raise ApiError(f"pair grant failed: error_id {data.get('error_id')!r}")
     return pairing["id"], pairing["auth_key"]
 
 
@@ -87,6 +119,7 @@ def tv_check_auth(host: str, user: str, password: str) -> None:
         verify=False,
         timeout=10,
         auth=HTTPDigestAuth(user, password),
+        allow_redirects=False,
     )
     if r.status_code in (401, 403):
         raise TvAuthError(f"TV rejected the pairing credentials: {r.status_code}")
@@ -101,20 +134,35 @@ def hue_register(host: str) -> dict | None:
         json={"devicetype": "halo_sync#homeassistant", "generateclientkey": True},
         verify=False,
         timeout=10,
-    ).json()
-    if not isinstance(r, list) or not all(isinstance(x, dict) for x in r):
-        raise ApiError(f"bridge registration answer is not a list: {r}")
-    if r and "success" in r[0]:
-        user = r[0]["success"]["username"]
-        appid = requests.get(
-            f"https://{host}/auth/v1", headers={"hue-application-key": user}, verify=False, timeout=10
-        ).headers.get("hue-application-id")
+    )
+    data = _json(r, "bridge registration")
+    if not isinstance(data, list) or not data or not all(isinstance(x, dict) for x in data):
+        raise ApiError(f"bridge registration answer is no list of objects (HTTP {r.status_code})")
+    first = data[0]
+    success = first.get("success")
+    if success is not None:
+        if not isinstance(success, dict):
+            raise ApiError("bridge registration answer: success is no object")
+        missing = _missing(success, "username", "clientkey")
+        if missing:
+            raise ApiError(f"bridge registration answer lacks {', '.join(missing)}")
+        user = success["username"]
+        auth = requests.get(
+            f"https://{host}/auth/v1",
+            headers={"hue-application-key": user},
+            verify=False,
+            timeout=10,
+            allow_redirects=False,
+        )
+        appid = auth.headers.get("hue-application-id")
         if not appid:
-            raise ApiError("bridge did not return hue-application-id")
-        return {"username": user, "clientkey": r[0]["success"]["clientkey"], "appid": appid}
-    if r and r[0].get("error", {}).get("type") == 101:
+            raise ApiError(f"bridge did not return hue-application-id (HTTP {auth.status_code})")
+        return {"username": user, "clientkey": success["clientkey"], "appid": appid}
+    error = first.get("error")
+    if isinstance(error, dict) and error.get("type") == 101:
         return None
-    raise ApiError(f"bridge registration failed: {r}")
+    error_type = error.get("type") if isinstance(error, dict) else None
+    raise ApiError(f"bridge registration failed: error type {error_type!r}")
 
 
 def hue_entertainment_areas(host: str, user: str) -> dict[str, str]:
@@ -123,9 +171,21 @@ def hue_entertainment_areas(host: str, user: str) -> dict[str, str]:
         headers={"hue-application-key": user},
         verify=False,
         timeout=10,
+        allow_redirects=False,
     )
     if r.status_code in (401, 403):
         # Otherwise the bridge's error answer (empty "data") would read as "no entertainment areas".
-        raise ApiError(f"bridge rejected the application key: {r.status_code}")
-    data = r.json()["data"]
-    return {c["id"]: c["metadata"]["name"] for c in data}
+        raise HueAuthError(f"bridge rejected the application key: {r.status_code}")
+    if r.status_code != 200:
+        raise ApiError(f"bridge answered {r.status_code} to the entertainment area request")
+    answer = _json(r, "entertainment areas")
+    data = answer.get("data") if isinstance(answer, dict) else None
+    if not isinstance(data, list):
+        raise ApiError("entertainment area answer has no data list")
+    areas: dict[str, str] = {}
+    for c in data:
+        meta = c.get("metadata") if isinstance(c, dict) else None
+        if not isinstance(meta, dict) or not isinstance(c.get("id"), str) or not isinstance(meta.get("name"), str):
+            raise ApiError("entertainment area answer has an entry without id or name")
+        areas[c["id"]] = meta["name"]
+    return areas

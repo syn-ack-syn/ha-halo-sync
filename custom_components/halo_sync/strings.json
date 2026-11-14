@@ -33,11 +33,26 @@
       },
       "reconfigure": {
         "title": "Change addresses",
-        "description": "Change the address of the TV or the Hue bridge, for example after the router gave them a new IP. The pairing and your presets are kept. Next you can choose the entertainment area.",
+        "description": "Change the address of the TV or the Hue bridge, for example after the router gave them a new IP. Your presets are kept. A new bridge address is linked again with the link button. If the TV at a new address does not accept the stored pairing, you pair it again with a PIN. Next you can choose the entertainment area.",
         "data": {
           "tv_host": "TV IP address",
           "hue_host": "Hue bridge IP address"
         }
+      },
+      "reconfigure_tv": {
+        "title": "Pair the TV at the new address",
+        "description": "Switch the TV on and submit. A PIN then appears on the TV."
+      },
+      "reconfigure_tv_pin": {
+        "title": "TV pairing",
+        "description": "Enter the PIN shown on the TV.",
+        "data": {
+          "pin": "PIN"
+        }
+      },
+      "reconfigure_hue_link": {
+        "title": "Link the Hue bridge",
+        "description": "Press the link button on the Hue bridge, then submit within 30 seconds. The bridge then gives Halo Sync a new key."
       },
       "reconfigure_area": {
         "title": "Entertainment area",
@@ -78,7 +93,8 @@
       "no_tv": "Choose a TV from the list or type its IP address.",
       "no_bridge": "Choose a Hue bridge from the list or type its IP address.",
       "no_areas": "The bridge has no entertainment areas. Create one in the Hue app, then submit again.",
-      "tv_auth": "The TV no longer accepts the stored pairing. Pair it again with the re-authentication notice for Halo Sync under Settings > Devices & services."
+      "tv_auth": "The TV at this address does not accept the stored pairing. Submit to pair it again.",
+      "hue_auth": "The Hue bridge does not accept the key."
     },
     "abort": {
       "already_configured": "This TV and entertainment area are already configured.",
