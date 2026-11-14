@@ -155,18 +155,28 @@ def test_tv_check_auth(get):
 class _ChallengeAdapter(requests.adapters.BaseAdapter):
     """Local transport: every request gets this answer, or raises `fail`; nothing leaves the process."""
 
-    def __init__(self, challenge: str = "", fail: Exception | None = None):
+    def __init__(self, challenge: str = "", fail: Exception | None = None, then=None):
         super().__init__()
-        self.challenge, self.fail, self.sent = challenge, fail, 0
+        # then: what the second request (the digest retry) gets: an exception or a body for HTTP 200.
+        self.challenge, self.fail, self.then, self.sent = challenge, fail, then, 0
+        self.authorization: list[str | None] = []
 
     def send(self, request, **kwargs):
         self.sent += 1
+        self.authorization.append(request.headers.get("Authorization"))
         if self.fail is not None:
             raise self.fail
         r = requests.Response()
-        r.status_code, r.reason, r.url, r.request = 401, "Unauthorized", request.url, request
+        r.url, r.request, r.raw, r.connection = request.url, request, io.BytesIO(b""), self
+        if self.sent > 1 and self.then is not None:
+            if isinstance(self.then, Exception):
+                raise self.then
+            r.status_code, r.reason = 200, "OK"
+            r.headers = requests.structures.CaseInsensitiveDict({"Content-Type": "application/json"})
+            r._content = self.then
+            return r
+        r.status_code, r.reason = 401, "Unauthorized"
         r.headers = requests.structures.CaseInsensitiveDict({"WWW-Authenticate": self.challenge})
-        r.raw = io.BytesIO(b"")
         return r
 
     def close(self):
@@ -192,7 +202,22 @@ def test_malformed_digest_challenge_is_api_error(transport, challenge):
     with pytest.raises(api.ApiError) as exc:
         api.tv_pair_grant("tv.invalid", PAIRING, "1234")
     assert "s3cr3t" not in str(exc.value)
-    assert adapter.sent == 2  # no request left the local transport
+    assert adapter.sent == 2  # one request per call; the malformed challenge sends no retry
+
+
+def test_valid_digest_challenge_answers_with_the_retry(transport):
+    adapter = transport(challenge='Digest realm="tv", nonce="n1", qop="auth"', then=b'{"powerstate": "On"}')
+    api.tv_check_auth("tv.invalid", "dev", "key")
+    assert adapter.sent == 2  # challenge, then the authorized retry
+    assert adapter.authorization[0] is None and adapter.authorization[1].startswith("Digest ")
+    assert 'username="dev"' in adapter.authorization[1]
+
+
+def test_errors_outside_the_challenge_stay_visible(transport):
+    """A failure while sending the authorized retry is no "unusable challenge"."""
+    transport(challenge='Digest realm="tv", nonce="n1", qop="auth"', then=TypeError("boom"))
+    with pytest.raises(TypeError):
+        api.tv_check_auth("tv.invalid", "dev", "key")
 
 
 def test_network_errors_stay_request_exceptions(transport):

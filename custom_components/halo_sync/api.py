@@ -77,15 +77,13 @@ class _ChallengeError(Exception):
 class _StrictDigestAuth(HTTPDigestAuth):
     """HTTPDigestAuth that reports a malformed challenge instead of a stray KeyError and the like.
 
-    Only the challenge handling is guarded: errors in building or sending the request itself stay
-    visible as what they are.
+    Only the evaluation of the challenge (building the digest header) is guarded: errors in building
+    or sending either request stay visible as what they are.
     """
 
-    def handle_401(self, r, **kwargs):
+    def build_digest_header(self, method, url):
         try:
-            return super().handle_401(r, **kwargs)
-        except requests.RequestException:
-            raise
+            return super().build_digest_header(method, url)
         except (KeyError, ValueError, TypeError, AttributeError, IndexError) as exc:
             raise _ChallengeError(exc) from exc
 
