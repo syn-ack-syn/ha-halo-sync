@@ -27,6 +27,10 @@ class ApiError(Exception):
     """Raised when the TV or bridge rejects a request."""
 
 
+class TvAuthError(ApiError):
+    """Raised when the TV rejects the stored pairing credentials (HTTP 401/403)."""
+
+
 def _device(dev_id: str) -> dict:
     return {
         "device_name": "Home Assistant Halo Sync",
@@ -46,8 +50,10 @@ def tv_pair_request(host: str) -> dict:
         verify=False,
         timeout=10,
     ).json()
-    if r.get("error_id") != "SUCCESS":
+    if not isinstance(r, dict) or r.get("error_id") != "SUCCESS":
         raise ApiError(f"pair request failed: {r}")
+    if "auth_key" not in r or "timestamp" not in r:
+        raise ApiError(f"pair request answer has no auth_key or timestamp: {r}")
     return {"id": dev_id, "auth_key": r["auth_key"], "timestamp": r["timestamp"]}
 
 
@@ -71,6 +77,23 @@ def tv_pair_grant(host: str, pairing: dict, pin: str) -> tuple[str, str]:
     return pairing["id"], pairing["auth_key"]
 
 
+def tv_check_auth(host: str, user: str, password: str) -> None:
+    """Authenticated read with the stored pairing, like the TV reader (`/6/powerstate`, answers in standby too).
+
+    Raises TvAuthError when the TV rejects the credentials, ApiError for any other unexpected answer.
+    """
+    r = requests.get(
+        f"https://{host}:1926/6/powerstate",
+        verify=False,
+        timeout=10,
+        auth=HTTPDigestAuth(user, password),
+    )
+    if r.status_code in (401, 403):
+        raise TvAuthError(f"TV rejected the pairing credentials: {r.status_code}")
+    if r.status_code != 200:
+        raise ApiError(f"TV answered {r.status_code} to an authenticated request")
+
+
 def hue_register(host: str) -> dict | None:
     """Create an app key with an entertainment client key. None = link button not pressed."""
     r = requests.post(
@@ -79,6 +102,8 @@ def hue_register(host: str) -> dict | None:
         verify=False,
         timeout=10,
     ).json()
+    if not isinstance(r, list) or not all(isinstance(x, dict) for x in r):
+        raise ApiError(f"bridge registration answer is not a list: {r}")
     if r and "success" in r[0]:
         user = r[0]["success"]["username"]
         appid = requests.get(
@@ -93,10 +118,14 @@ def hue_register(host: str) -> dict | None:
 
 
 def hue_entertainment_areas(host: str, user: str) -> dict[str, str]:
-    data = requests.get(
+    r = requests.get(
         f"https://{host}/clip/v2/resource/entertainment_configuration",
         headers={"hue-application-key": user},
         verify=False,
         timeout=10,
-    ).json()["data"]
+    )
+    if r.status_code in (401, 403):
+        # Otherwise the bridge's error answer (empty "data") would read as "no entertainment areas".
+        raise ApiError(f"bridge rejected the application key: {r.status_code}")
+    data = r.json()["data"]
     return {c["id"]: c["metadata"]["name"] for c in data}

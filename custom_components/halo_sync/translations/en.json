@@ -28,20 +28,85 @@
         "title": "Entertainment area",
         "data": {
           "entertainment_id": "Entertainment area"
+        },
+        "description": "Choose the Hue entertainment area the TV colors are sent to."
+      },
+      "reconfigure": {
+        "title": "Change addresses",
+        "description": "Change the address of the TV or the Hue bridge, for example after the router gave them a new IP. The pairing and your presets are kept. Next you can choose the entertainment area.",
+        "data": {
+          "tv_host": "TV IP address",
+          "hue_host": "Hue bridge IP address"
         }
+      },
+      "reconfigure_area": {
+        "title": "Entertainment area",
+        "description": "Choose the Hue entertainment area the TV colors are sent to.",
+        "data": {
+          "entertainment_id": "Entertainment area"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Pair again",
+        "description": "The TV or the Hue bridge no longer accepts the stored pairing. Choose what to pair again.",
+        "menu_options": {
+          "reauth_tv": "TV (new PIN)",
+          "reauth_hue_link": "Hue bridge (link button)"
+        }
+      },
+      "reauth_tv": {
+        "title": "Pair the TV again",
+        "description": "The TV no longer accepts the stored pairing, for example after a reset. Switch the TV on and submit. A PIN then appears on the TV."
+      },
+      "reauth_tv_pin": {
+        "title": "TV pairing",
+        "description": "Enter the PIN shown on the TV.",
+        "data": {
+          "pin": "PIN"
+        }
+      },
+      "reauth_hue_link": {
+        "title": "Link the Hue bridge again",
+        "description": "The Hue bridge no longer accepts the stored key. Press the link button on the bridge, then submit within 30 seconds."
       }
     },
     "error": {
       "tv_unreachable": "Could not reach the TV or start pairing.",
-      "bad_pin": "Pairing failed (wrong or expired PIN). Go back and start again.",
+      "bad_pin": "Wrong or expired PIN. A new PIN is now shown on the TV.",
       "hue_unreachable": "Could not reach the Hue bridge.",
       "link_button": "Link button not pressed. Press it and submit again.",
       "no_tv": "Choose a TV from the list or type its IP address.",
-      "no_bridge": "Choose a Hue bridge from the list or type its IP address."
+      "no_bridge": "Choose a Hue bridge from the list or type its IP address.",
+      "no_areas": "The bridge has no entertainment areas. Create one in the Hue app, then submit again.",
+      "tv_auth": "The TV no longer accepts the stored pairing. Pair it again with the re-authentication notice for Halo Sync under Settings > Devices & services."
     },
     "abort": {
       "already_configured": "This TV and entertainment area are already configured.",
-      "no_areas": "The bridge has no entertainment areas. Create one in the Hue app first."
+      "reconfigure_successful": "The new settings are saved.",
+      "reauth_successful": "Pairing renewed."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Halo Sync options",
+        "data": {
+          "adb_source": "TV source sensor via ADB",
+          "tv_endpoint": "Ambilight endpoint"
+        },
+        "data_description": {
+          "adb_source": "Shows the current TV input as a sensor. The TV asks once to allow debugging.",
+          "tv_endpoint": "Where the TV colors are read. Measured works on most TVs. Processed answers faster, but is all zeros on some newer firmware."
+        }
+      }
+    }
+  },
+  "selector": {
+    "tv_endpoint": {
+      "options": {
+        "measured": "Measured (default)",
+        "processed": "Processed"
+      }
     }
   },
   "entity": {
@@ -85,6 +150,11 @@
           "description": "Preset name, e.g. Game"
         }
       }
+    }
+  },
+  "exceptions": {
+    "unknown_preset": {
+      "message": "Unknown preset: {preset}"
     }
   }
 }
